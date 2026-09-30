@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -139,18 +140,24 @@ def verify(repo: Path, repository: str, number: int, base: str, head: str,
     check_identity(pr, repository, base, head, head_sha, source_sha=source_sha, state=state)
     expected = set(git(repo, "diff", "--name-only", "-z", "--find-renames=50%",
                        f"{source_sha}...{head_sha}", "--").decode(errors="surrogateescape").split("\0")) - {""}
-    files = api.api(f"repos/{repository}/pulls/{number}/files?per_page=100", paginate=True)
+    merge_base = git(repo, "merge-base", source_sha, head_sha).decode().strip()
+    # These four reads share a pinned initial PR identity. Verify that identity again afterward.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        file_query = pool.submit(api.api, f"repos/{repository}/pulls/{number}/files?per_page=100", paginate=True)
+        before_query = pool.submit(verify_tree, repo, repository, merge_base, api)
+        after_query = pool.submit(verify_tree, repo, repository, head_sha, api)
+        patch_query = pool.submit(api.api, f"repos/{repository}/pulls/{number}", diff=True)
+        files = file_query.result()
+        before_tree, after_tree = before_query.result(), after_query.result()
+        remote_patch = patch_query.result()
     paths = [item["filename"] for item in files]
     if len(paths) != len(set(paths)) or len(paths) != pr.get("changed_files") or set(paths) != expected:
         raise VerificationError("PR changed-files mismatch or incomplete GitHub file response")
     # GitHub renders binary changes as summaries, not Git binary patch literals.
     # Prove old/new contents first; text whitespace, modes and rename headers still
     # undergo the existing strict patch comparison. A missing patch is NOT "binary".
-    merge_base = git(repo, "merge-base", source_sha, head_sha).decode().strip()
-    before_tree = verify_tree(repo, repository, merge_base, api)
-    after_tree = verify_tree(repo, repository, head_sha, api)
     patch = local_diff(repo, source_sha, head_sha, binary=False)
-    compare_patches(patch, api.api(f"repos/{repository}/pulls/{number}", diff=True))
+    compare_patches(patch, remote_patch)
     # Detect a moving PR between the metadata, file-list and patch requests.
     after = api.view(repository, number)
     check_identity(after, repository, base, head, head_sha, source_sha=source_sha, state=state)

@@ -14,6 +14,7 @@ import re
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -22,6 +23,7 @@ import inspect_worktrees as inspector
 import prepare_generation_branch as generation
 import retire_generation_branch as retirement
 import slot_manifest as manifest
+import submit_review as review
 import verify_pr as verifier
 
 
@@ -203,6 +205,7 @@ class Runner:
         if held:
             missing.append("slot operation lock is held; verify its owner before stale-lock recovery")
         rows = []
+        candidates = []
         for item in scan["bundles"][0]["items"]:
             name, repo = item["repo"], Path(item["path"])
             row = {"repository": name, "path": str(repo), "dirty": item["dirty"]}
@@ -242,51 +245,136 @@ class Runner:
                     row.update(state="READY")
                     rows.append(row)
                     continue
-                heads = remote_heads(repo, identity["remote"], identity["source_branch"], branch)
-                source = heads.get(identity["source_branch"])
-                if not source:
-                    raise SubmitError("bound remote source is missing")
-                row.update(state=self.classify(name, identity, repository), branch=branch,
-                           head_sha=head, generation=identity["generation"],
-                           source_sha=source, github_repository=repository, remote_key=remote_key,
-                           identity_fingerprint=digest(identity),
-                           changed_paths=sorted(changed_paths(repo)), rotation=rotation.get("phase"),
-                           remote_head_sha=heads.get(branch))
-                if content_snapshot:
-                    row["worktree_fingerprint"] = worktree_fingerprint(repo)
-                    review_boundary = rotation.get("boundary_sha") or (
-                        submission.get("continuation_boundary_sha") if branch == submission.get("head_branch")
-                        else identity["branch_base_sha"])
-                    review_head = rotation.get("from_head_sha", head)
-                    committed_paths = verifier.git(repo, "diff", "--name-only", "--no-renames", "-z",
-                                                   review_boundary, review_head, "--")
-                    row["committed_review"] = {"boundary_sha": review_boundary, "head_sha": review_head,
-                        "changed_paths": [p for p in committed_paths.decode(errors="surrogateescape").split("\0") if p]}
-                    row["plan"] = {"expected_head": head, "expected_generation": identity["generation"],
-                        "expected_branch": branch, "expected_worktree": row["worktree_fingerprint"],
-                        "expected_remote": remote_key, "expected_identity": digest(identity),
-                        "paths": row["changed_paths"], "commit_message": "", "transfer_subject": "",
-                        "pr_title": "", "pr_body": ""}
+                candidates.append((row, repo, identity, branch, head))
             except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
                 row.update(state="BLOCKED", error=str(exc))
             rows.append(row)
+
+        def inspect_remote(candidate):
+            row, repo, identity, branch, _ = candidate
+            heads = remote_heads(repo, identity["remote"], identity["source_branch"], branch)
+            source = heads.get(identity["source_branch"])
+            if not source:
+                raise SubmitError("bound remote source is missing")
+            return heads, source, self.classify(row["repository"], identity, row["github_repository"])
+
+        # Only read-only candidate lookups overlap; publication guards stay sequential.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(inspect_remote, candidate) for candidate in candidates]
+            for (row, repo, identity, branch, head), future in zip(candidates, futures):
+                try:
+                    heads, source, state = future.result()
+                    row.update(state=state, source_sha=source, changed_paths=sorted(changed_paths(repo)),
+                               remote_head_sha=heads.get(branch))
+                    if content_snapshot:
+                        self.prepare_content(row, repo, identity, branch, head)
+                except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                    row.update(state="BLOCKED", error=str(exc))
         return {"mode": "preflight", "slot": self.slot, "bundle": str(self.base),
                 "repositories": rows, "errors": missing, "seconds": round(time.monotonic() - started, 3)}
 
+    def prepare_content(self, row: dict, repo: Path, identity: dict, branch: str, head: str) -> None:
+        name, state = row["repository"], row["state"]
+        plan = {"expected_head": head, "expected_generation": identity["generation"],
+                "expected_branch": branch, "expected_remote": row["remote_key"],
+                "expected_identity": digest(identity), "paths": row["changed_paths"],
+                "prepared_state": state, "task_summary": ""}
+        if state == "RECOVER":
+            pending = self.receipts[name]["pending"]
+            plan.update(pending.get("inputs", {}))
+            row.update(action="RECOVER_PUBLICATION", required_fields=[], content_review_required=False,
+                       publication={key: pending.get(key) for key in ("branch", "head_sha", "pr_url")}, plan=plan)
+            return
+        row["worktree_fingerprint"] = worktree_fingerprint(repo)
+        plan["expected_worktree"] = row["worktree_fingerprint"]
+        rotation = identity.get("rotation", {})
+        submission = identity.get("submission") or {}
+        boundary = rotation.get("boundary_sha") or (
+            submission.get("continuation_boundary_sha") if branch == submission.get("head_branch")
+            else identity["branch_base_sha"])
+        review_head = rotation.get("from_head_sha", head)
+        committed_paths = verifier.git(repo, "diff", "--name-only", "--no-renames", "-z", boundary, review_head, "--")
+        committed = [p for p in committed_paths.decode(errors="surrogateescape").split("\0") if p]
+        row["committed_review"] = {"boundary_sha": boundary, "head_sha": review_head, "changed_paths": committed}
+        row["action"] = review.action(state, row["changed_paths"], committed)
+        saved = self.resume_plan(name)
+        if saved is not None and self.receipts[name].get("last_result", {}).get("state") == "FAILED":
+            plan = saved
+            row["content_review_required"] = False
+        else:
+            row["content_review_required"] = bool(row["changed_paths"] or (state != "OPEN" and committed))
+        if rotation:
+            plan["transfer_subject"] = rotation["transfer_subject"]
+        row["required_fields"] = review.required_fields(state, row["changed_paths"], committed, plan,
+            revalidation=bool(self.receipts.get(name, {}).get("revalidation_required")) or self.test or
+                plan.get("validation_mode") == "always",
+            rotation_required=bool(rotation) or row["source_sha"] != identity["branch_base_sha"])
+        row["plan"] = plan
+
+    def write_plan(self, plans: dict) -> Path:
+        path = self.root / ".stageflow-worktrees" / "submit-plans" / (uuid.uuid4().hex + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8", errors="backslashreplace") as stream:
+            json.dump({"repositories": plans}, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        return path
+
     def prepare(self, repositories: set[str] | None = None) -> dict:
         result = self.preflight(repositories=repositories, candidates_only=True)
+        for row in result["repositories"]:
+            if not row.get("content_review_required") or "plan" not in row:
+                continue
+            try:
+                plan, committed = row["plan"], row["committed_review"]
+                directory = self.root / ".stageflow-worktrees" / "submit-plans" / (uuid.uuid4().hex + ".review")
+                row["review_path"] = review.write_material(Path(row["path"]), directory,
+                    head=plan["expected_head"], boundary=committed["boundary_sha"],
+                    committed_head=committed["head_sha"], include_committed=row["state"] != "OPEN")
+                if g(Path(row["path"]), "rev-parse", "HEAD") != plan["expected_head"] or \
+                        worktree_fingerprint(Path(row["path"])) != plan["expected_worktree"] or \
+                        digest(self.identity(row["repository"])) != plan["expected_identity"]:
+                    raise SubmitError("content changed while preparing review material; refresh preflight")
+            except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                row.update(state="BLOCKED", error=str(exc))
+                row.pop("plan", None)
+                row.pop("review_path", None)
         plans = {row["repository"]: row["plan"] for row in result["repositories"] if "plan" in row}
         if plans:
-            path = self.root / ".stageflow-worktrees" / "submit-plans" / (uuid.uuid4().hex + ".json")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("x", encoding="utf-8") as stream:
-                json.dump({"repositories": plans}, stream, ensure_ascii=False, indent=2)
-                stream.write("\n")
-            result["plan_path"] = str(path)
-        # Snapshot fields are already in the file; keep the human-facing report compact.
+            result["plan_path"] = str(self.write_plan(plans))
         for row in result["repositories"]:
             row.pop("plan", None)
         return result
+
+    def checkpoint(self, name: str, plan: dict, head: str) -> None:
+        identity = self.identity(name)
+        repo = self.bound(name, identity, plan["expected_remote"])
+        clean(repo)
+        if g(repo, "rev-parse", "HEAD") != head or g(repo, "branch", "--show-current") != active_branch(identity):
+            raise SubmitError("input moved before saving the retry snapshot")
+        checkpoint = {**plan,
+            "expected_head": head, "expected_branch": active_branch(identity),
+            "expected_generation": identity["generation"], "expected_identity": digest(identity),
+            "expected_worktree": worktree_fingerprint(repo), "paths": []}
+        if self.receipts.setdefault(name, {}).get("resume_plan") != checkpoint:
+            self.receipts[name]["resume_plan"] = checkpoint
+            self.save()
+
+    def resume_plan(self, name: str) -> dict | None:
+        plan = self.receipts.get(name, {}).get("resume_plan")
+        if not plan:
+            return None
+        identity = self.identity(name)
+        repo = self.base / name
+        if repo.resolve() != repo or Path(g(repo, "rev-parse", "--show-toplevel")).resolve() != repo or \
+                inspector.operation_state(repo) != "-":
+            return None
+        if plan.get("expected_identity") != digest(identity) or \
+                plan.get("expected_remote") != remote_identity(repo, identity["remote"])[1] or \
+                plan.get("expected_head") != g(repo, "rev-parse", "HEAD") or \
+                plan.get("expected_branch") != g(repo, "branch", "--show-current") or \
+                plan.get("expected_worktree") != worktree_fingerprint(repo):
+            return None
+        return dict(plan)
 
     def bound(self, name: str, identity: dict, remote_key: str) -> Path:
         manifest.require_operation_lock(self.root, self.slot, self.token)
@@ -637,7 +725,9 @@ class Runner:
                 if self.recover_source(name, pending):
                     # No remote publication and no continuation: the saved reviewed commit
                     # remains the sole work input. Replan it once using the normal path.
-                    refreshed = {**plan, "expected_head": pending["head_sha"],
+                    overrides = {key: plan[key] for key in ("validation", "validation_mode", "validation_timeout_seconds")
+                                 if key in plan}
+                    refreshed = {**pending.get("inputs", plan), **overrides, "expected_head": pending["head_sha"],
                         "expected_worktree": worktree_fingerprint(self.base / name),
                         "expected_branch": pending["branch"], "expected_generation": identity["generation"],
                         "expected_remote": pending["remote_key"], "expected_identity": digest(identity)}
@@ -645,6 +735,7 @@ class Runner:
                 return self.publish(name, pending, recovering=True)
         if row["state"] == "BLOCKED":
             raise SubmitError(row["error"])
+        plan = review.expand_prose(plan)
         repo = self.bound(name, identity, row["remote_key"])
         if plan.get("expected_head") != g(repo, "rev-parse", "HEAD") or \
                 plan.get("expected_generation") != identity["generation"] or \
@@ -653,6 +744,9 @@ class Runner:
                 plan.get("expected_branch") != g(repo, "branch", "--show-current"):
             raise SubmitError("reviewed plan snapshot no longer matches HEAD/branch/generation; refresh preflight")
         state = self.classify(name, identity, row["github_repository"])
+        if plan.get("prepared_state") == "OPEN" and state != "OPEN":
+            raise SubmitError("waiting PR changed state; prepare and review the continuation before submitting it")
+        plan["prepared_state"] = state
         expected_head = plan["expected_head"]
         reviewed_head = identity.get("rotation", {}).get("from_head_sha", expected_head)
         self.validation_trees[name] = g(repo, "rev-parse", reviewed_head + "^{tree}")
@@ -665,6 +759,7 @@ class Runner:
             with self.phase("commit"):
                 expected_head = self.commit(repo, plan)
             reviewed_head = expected_head
+        self.checkpoint(name, plan, expected_head)
         self.validation_trees[name] = g(repo, "rev-parse", reviewed_head + "^{tree}")
         if state == "OPEN":
             return {"state": "WAITING", "pr": identity["pr"], "pushed": False}
@@ -672,6 +767,7 @@ class Runner:
             identity = self.identity(name)
             source = self.fetch_source(repo, identity)
             expected_head = self.rotate_for_submit(name, source, plan.get("transfer_subject"), expected_head)
+        self.checkpoint(name, plan, expected_head)
         identity = self.identity(name)
         if not verifier.git(repo, "diff", "--name-only", f"{source}...HEAD", "--"):
             return self.no_diff(name, identity["branch"])
@@ -685,6 +781,7 @@ class Runner:
                 g(repo, "merge-base", "--is-ancestor", source, refreshed)
                 expected_head = self.rotate_for_submit(name, refreshed, plan.get("transfer_subject"), expected_head)
                 source, identity = refreshed, self.identity(name)
+            self.checkpoint(name, plan, expected_head)
             if not verifier.git(repo, "diff", "--name-only", f"{source}...HEAD", "--"):
                 return self.no_diff(name, identity["branch"])
             with self.phase("validation"):
@@ -692,7 +789,7 @@ class Runner:
         pending = {"identity": identity, "repository": row["github_repository"],
                    "remote_key": row["remote_key"], "branch": identity["branch"],
                    "head_sha": expected_head, "source_sha": source,
-                   "title": title, "body": body}
+                   "title": title, "body": review.publication_body(plan, self.timings), "inputs": plan}
         # Validate before making a durable pending entry. Once pending exists, never add B.
         self.check_publication(name, pending, recovering=False)
         self.receipts.setdefault(name, {})["pending"] = pending
@@ -732,6 +829,29 @@ class Runner:
                                             "VERIFICATION_FAILED" if failed_phase == "verify_pr" else
                                             "VALIDATION_FAILED" if failed_phase == "validation" else "SUBMIT_FAILED",
                               "failed_phase": failed_phase}
+                    try:
+                        resume = (receipt["pending"].get("inputs", plan) if receipt.get("pending")
+                                  else self.resume_plan(name))
+                        if resume is not None:
+                            result["resume_plan_path"] = str(self.write_plan({name: resume}))
+                            result["content_review_required"] = False
+                            if receipt.get("pending"):
+                                result["required_fields"] = []
+                            else:
+                                identity = self.identity(name)
+                                repo = self.base / name
+                                boundary = identity["branch_base_sha"]
+                                if identity["pr"] and identity["branch"] == identity["submission"]["head_branch"]:
+                                    boundary = identity["submission"]["continuation_boundary_sha"]
+                                committed = g(repo, "diff", "--name-only", boundary, resume["expected_head"], "--").splitlines()
+                                result["required_fields"] = review.required_fields(resume["prepared_state"], [], committed, resume,
+                                    revalidation=bool(receipt.get("revalidation_required")) or self.test or
+                                        resume.get("validation_mode") == "always",
+                                    rotation_required=failed_phase in {"fetch_and_rotate", "source_replan", "resume_rotation"})
+                        else:
+                            result["content_review_required"] = True
+                    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+                        result["content_review_required"] = True
                 result.update(repository=name, seconds=round(time.monotonic() - started, 3),
                               attempts=receipt["attempts"], retry_count=receipt["attempts"] - 1, phases=self.timings)
                 receipt["last_result"] = result
