@@ -63,6 +63,9 @@ stageflow@stage-flow  installed, enabled
 - Stageflow: use `Stageflow`, `stageflow`, `stage-flow`, or `.stageflow`.
 - Simple Workflow: use `Simple Workflow`, `simple-workflow`, or `.simple`.
 - Atomic Docs: use `atomic-docs`.
+- Multi Repo Worktree: use `$stageflow:multi-repo-worktree` for permanent development bundles, PR submission, synchronization, and branch promotion.
+
+For an existing slot, `$stageflow:multi-repo-worktree promote` advances each selected repository's remote source branch through `dev → dev2 → prod`. The source is taken from that repository's slot configuration; a source already on this path skips prior stages. The command prepares a reviewable snapshot, uses fast-forward pushes, and records partial progress for retry while local development continues. It finishes at remote `prod` branch reflection. Divergent histories require separate integration; existing branch protection still applies.
 
 ### Simple Workflow Roles
 

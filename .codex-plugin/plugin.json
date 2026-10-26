@@ -1,6 +1,6 @@
 {
   "name": "stageflow",
-  "version": "0.1.24+codex.20260930025807",
+  "version": "0.1.24+codex.20261026091142",
   "description": "Standardize Stageflow planning flows with durable request artifacts and validation gates.",
   "author": {
     "name": "Local developer"
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Stageflow",
     "shortDescription": "Plan Codex work and expose Simple Workflow plus atomic-docs.",
-    "longDescription": "Stageflow helps Codex inspect a project, clarify requirements, preserve request-specific artifacts, review plans, require explicit approval, proceed from a validated plan, and expose atomic-docs for small source-guided documentation of purpose, boundaries, contracts, implementation context, source locators, active changes, open questions, and direct dependencies. It also exposes Simple Workflow for a lightweight reviewed plan.md flow, atomic-impl for docs-first implementation from approved Atomic Docs RIDs, multi-repo-worktree for explicitly invoked permanent development worktrees with one-time create, squash-merge-safe generation branches, isolated PR corrections, and help, status, submit, pull, and sync workflows, and uiux-workflow for explicitly invoked UI/UX implementation against project design.md guidance with a bounded subagent review cycle.",
+    "longDescription": "Stageflow helps Codex inspect a project, clarify requirements, preserve request-specific artifacts, review plans, require explicit approval, proceed from a validated plan, and expose atomic-docs for small source-guided documentation of purpose, boundaries, contracts, implementation context, source locators, active changes, open questions, and direct dependencies. It also exposes Simple Workflow for a lightweight reviewed plan.md flow, atomic-impl for docs-first implementation from approved Atomic Docs RIDs, multi-repo-worktree for explicitly invoked permanent development worktrees with one-time create, squash-merge-safe generation branches, isolated PR corrections, source-to-prod branch promotion, and help, status, submit, promote, pull, and sync workflows, and uiux-workflow for explicitly invoked UI/UX implementation against project design.md guidance with a bounded subagent review cycle.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -31,6 +31,7 @@
       "Use atomic-docs inspect to check purpose, boundaries, contracts, implementation, changes, and open questions.",
       "Use atomic-impl to record requirements as RIDs before implementing code.",
       "Use $stageflow:multi-repo-worktree submit to publish ready PRs while preserving local follow-up work.",
+      "Use $stageflow:multi-repo-worktree promote to advance the configured source branches through dev, dev2, and prod.",
       "Use $stageflow:uiux-workflow to implement and review a UI/UX change against the target project's design.md."
     ]
   }

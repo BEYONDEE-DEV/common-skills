@@ -1,6 +1,6 @@
 interface:
   display_name: "Multi Repo Worktree"
-  short_description: "Permanent worktrees with squash-safe generation branches."
+  short_description: "Permanent worktrees, ready PRs and branch promotion."
   default_prompt: "Use $stageflow:multi-repo-worktree submit to publish ready PRs while preserving local follow-up work."
 
 policy:

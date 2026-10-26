@@ -16,10 +16,11 @@
 - Retry, legacy recovery, and partial results
 - Pull
 - Sync
+- Promote
 
 ## Keyword Authorization And Decision Contract
 
-Expose only `help`, `status`, `create`, `submit`, `pull`, and `sync`. Do not normalize or advertise removed `recycle`, `integrate`, `merge`, `merge-back`, or `sync-derived` commands.
+Expose only `help`, `status`, `create`, `submit`, `promote`, `pull`, and `sync`. Do not normalize or advertise removed `recycle`, `integrate`, `merge`, `merge-back`, or `sync-derived` commands.
 
 An explicit write-keyword request authorizes that keyword's routine writes. `status`, inspection, or dry-run stays read-only. Before routine writes:
 
@@ -32,7 +33,7 @@ An explicit write-keyword request authorizes that keyword's routine writes. `sta
 
 Do not ask for routine commands, task-related path lists, generated Korean text, or manifest-proven transitions. Ask one consolidated question only for conflicting permanent facts, ambiguous/secret/unrelated content, an inseparable PR correction, stale-lock recovery, or conflict recovery.
 
-Never reset, clean, force checkout, force push to update a branch, rewrite published history, amend, stash, or auto-resolve conflicts. A clean internal correction worktree and its unpublished temporary local branch may be removed after exact remote and manifest verification. A journaled internal generation worktree may be populated from the exact result tree and removed without force only after its source/index/tree/HEAD are proven. Every common rotation retires only its journal-proven old local generation after the target is switched and verified. During explicit `sync`, an exact merged remote PR ref may also be removed; a legacy local ref may be removed only with exact completed-rotation proof. The remote operation is an expected-head deletion lease, not permission to update or rewrite a branch. These are bounded routine cleanups, not slot release.
+Never reset, clean, force checkout, force push to rewrite a branch, rewrite published history, amend, stash, or auto-resolve conflicts. `promote` uses an exact expected-head update lease only after independently proving fast-forward ancestry; it never rewrites history or recreates a deleted branch. A clean internal correction worktree and its unpublished temporary local branch may be removed after exact remote and manifest verification. A journaled internal generation worktree may be populated from the exact result tree and removed without force only after its source/index/tree/HEAD are proven. Every common rotation retires only its journal-proven old local generation after the target is switched and verified. During explicit `sync`, an exact merged remote PR ref may also be removed; a legacy local ref may be removed only with exact completed-rotation proof. The cleanup remote operation is an expected-head deletion lease, not permission to update or rewrite a branch. These are bounded routine cleanups, not slot release.
 
 ## Roles And Generation-Branch Flow
 
@@ -51,6 +52,7 @@ create once at fetched origin/source SHA
 - **Development user**: creates one permanent bundle, develops, runs repeated `submit`, and may run development-only `sync`.
 - **Original user**: runs `pull` only in original/source worktrees.
 - **GitHub user**: reviews and manually merges ready PRs. The skill never merges them.
+- **Promotion user**: requests `promote` after changes reach the remote source branch. This advances that repository's variable source through `dev -> dev2 -> prod` using normal fast-forward pushes and independent per-stage progress. Read `promote-runner.md` for the dedicated runner; PR handling remains with submit/GitHub.
 
 There is no slot freeze, release, reassignment, or task-start `create`. The slot and worktree persist while active task branches rotate. Git cannot infer whether a local commit is a PR correction or future work, so ordinary OPEN submit never pushes local-ahead commits. Corrections require explicit intent and content separation.
 
@@ -459,3 +461,7 @@ python3 "<skill-dir>/scripts/cleanup_merged_branch.py" \
 The helper derives the repository path, remote, source, active branch, and submitted branch from exactly one current or `pending_remote_cleanups` record in the slot manifest. It requires a clean exact active development branch and no active rotation journal. The old local ref is normally absent because rotation already retired it. When a pre-retirement/legacy local ref exists, it must still equal that cleanup record's exact `last_rotation.from_head_sha`, be absent from all worktree checkouts, and reproduce the completed rotation tree; otherwise it is preserved. It separately requires the remote ref, when present, to equal the cleanup record's observed PR head. A corrected remote PR head and the local B-continuation head may differ and are checked against their separate manifest values. After both refs are absent, a pending record is removed while the manifest lock remains held; current submission identity is never cleared by cleanup.
 
 Deletion order is remote then local. The remote deletion uses only `--force-with-lease=refs/heads/<head>:<observed-head>` with a delete refspec, and the local deletion uses `git update-ref -d refs/heads/<head> <observed-local-head>`; never use blind `git push --delete`, `git branch -D`, or an unleased deletion. Re-read actual refs after each command. If GitHub already deleted the remote branch, continue with the locally proven branch. If one ref was deleted before a crash, the next `sync` treats it as an exact idempotent partial state. If a ref advanced, became checked out, the active tree moved, or proof is missing, preserve every remaining ref, report the repository-local blocker, and do not perform another rotation.
+
+## Promote
+
+Read `promote-runner.md` and use `scripts/promote_bundle.py` for an explicit `promote` request. It advances the manifest-bound remote source `x` through `dev -> dev2 -> prod`, skips preceding stages when `x` is already one of those branches, and preserves local worktrees and PR state. Preparation pins all branch inputs and reviews every fast-forward; execution journals and verifies each normal push. An ahead stage is retained with its additional commits included in the next stage's review. Missing branches, divergence, protection rejection or unexpected ref movement stop only that repository. Completion means the planned commits are observed on remote `prod`, not that any server deployment has finished.

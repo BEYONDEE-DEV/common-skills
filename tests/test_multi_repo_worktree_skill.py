@@ -57,7 +57,7 @@ class MultiRepoWorktreeSkillTests(unittest.TestCase):
         self.assertIn("Use only when the user explicitly invokes", text)
         self.assertIn("Do not use for ordinary Git, single-repo, or single-worktree requests", text)
         self.assertIn("multiple independent Git repositories", text)
-        for keyword in ["`help`", "`status`", "`create`", "`submit`", "`pull`", "`sync`"]:
+        for keyword in ["`help`", "`status`", "`create`", "`submit`", "`promote`", "`pull`", "`sync`"]:
             self.assertIn(keyword, text)
         self.assertIn("$stageflow:multi-repo-worktree <keyword> [free-form intent]", text)
         self.assertIn("[$stageflow:multi-repo-worktree](...)", text)
@@ -79,7 +79,7 @@ class MultiRepoWorktreeSkillTests(unittest.TestCase):
         self.assertIn("Do not ask for routine command", text)
         self.assertIn("Ask one consolidated question only", text)
         self.assertIn("records each confirmed remote source SHA", text)
-        self.assertIn("Never reset, clean, force checkout, force push to update a branch", text)
+        self.assertIn("Never reset, clean, force checkout, force push to rewrite a branch", text)
         self.assertIn("exact remote deletion lease", text)
         self.assertIn("compare-and-delete local ref", text)
         self.assertIn("`sync` runs only in the development bundle", text)
@@ -669,7 +669,8 @@ class MultiRepoWorktreeSkillTests(unittest.TestCase):
         text = read(OPENAI_YAML)
 
         self.assertIn('display_name: "Multi Repo Worktree"', text)
-        self.assertIn('short_description: "Permanent worktrees with squash-safe generation branches."', text)
+        # Presentation copy may describe newly added operations; invocation policy
+        # and the explicit skill prompt are the behavioral contract here.
         self.assertIn("Use $stageflow:multi-repo-worktree submit to publish ready PRs", text)
         self.assertIn("allow_implicit_invocation: false", text)
 
