@@ -1,4 +1,0 @@
-interface:
-  display_name: "Atomic Impl"
-  short_description: "Implement approved Atomic Docs changes."
-  default_prompt: "Use $atomic-impl to record requirements as Atomic Docs RIDs, obtain implementation approval, implement and review the code, then promote completed changes into durable docs."

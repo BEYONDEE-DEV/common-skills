@@ -1,6 +1,0 @@
-interface:
-  display_name: "Stageflow"
-  short_description: "Stageflow gated workflow with clarification store."
-  default_prompt: "Use $stageflow to clarify this request through the definition store, implementation plan, and implementation gates."
-policy:
-  allow_implicit_invocation: true

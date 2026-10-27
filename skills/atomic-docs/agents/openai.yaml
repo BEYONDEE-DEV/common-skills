@@ -1,4 +1,0 @@
-interface:
-  display_name: "Atomic Docs"
-  short_description: "Maintain small source-guided development docs."
-  default_prompt: "Use $atomic-docs to inspect or update purpose, boundaries, contracts, implementation context, source locators, active changes, open questions, and direct Atom dependencies."

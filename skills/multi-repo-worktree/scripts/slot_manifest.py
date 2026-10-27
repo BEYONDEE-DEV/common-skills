@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomically manage Stageflow's permanent multi-repo worktree generations."""
+"""Atomically manage permanent multi-repo worktree generations."""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ else:
 
 SCHEMA_VERSION = 5
 LEGACY_PERMANENT_SCHEMA_VERSIONS = {2, 3, 4}
-MANIFEST_RELATIVE_PATH = Path(".stageflow-worktrees") / "slots.json"
-LOCKS_RELATIVE_PATH = Path(".stageflow-worktrees") / "operation-locks"
-GENERATION_WORKTREES_RELATIVE_PATH = Path(".stageflow-worktrees") / "generation-worktrees"
+MANIFEST_RELATIVE_PATH = Path(".multi-repo-worktree") / "slots.json"
+LOCKS_RELATIVE_PATH = Path(".multi-repo-worktree") / "operation-locks"
+GENERATION_WORKTREES_RELATIVE_PATH = Path(".multi-repo-worktree") / "generation-worktrees"
 
 
 class ManifestError(RuntimeError):
@@ -1146,7 +1146,7 @@ def begin_rotations(
             raise ManifestError(f"repository {repo!r} already has a different rotation journal")
         if identity["branch"] != from_branch or identity["branch_generation"] != from_generation:
             raise ManifestError(f"repository {repo!r} rotation source mismatch")
-        expected_target = f"{identity['branch_family']}-stageflow-g{target_generation}"
+        expected_target = f"{identity['branch_family']}-mrw-g{target_generation}"
         if target != expected_target:
             raise ManifestError(f"repository {repo!r} rotation target is not deterministic")
         expected_temporary = generation_worktree_path(root, name, repo, target)

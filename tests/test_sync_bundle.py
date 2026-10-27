@@ -65,14 +65,14 @@ class SyncTests(unittest.TestCase):
     def test_preflight_is_read_only_and_does_not_query_dirty_repo_api_or_contents(self):
         self.change()
         before = git(self.repos["web"], "show-ref"), git(self.repos["web"], "status", "--porcelain")
-        metadata = {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()}
+        metadata = {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()}
         with mock.patch.object(self.api, "find", side_effect=AssertionError("dirty API query")), \
                 mock.patch.object(self.api, "view", side_effect=AssertionError("dirty API query")), \
                 mock.patch.object(submit, "worktree_fingerprint", side_effect=AssertionError("unnecessary content hash")):
             result = self.sync_runner().preflight()
         self.assertEqual(result["repositories"][0]["action"], "SKIP_DIRTY")
         self.assertEqual(before, (git(self.repos["web"], "show-ref"), git(self.repos["web"], "status", "--porcelain")))
-        self.assertEqual(metadata, {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()})
+        self.assertEqual(metadata, {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()})
 
     def test_none_unchanged_noop_and_no_submit_actions(self):
         with mock.patch.object(submit.Runner, "commit", side_effect=AssertionError("task commit")), \
@@ -89,10 +89,10 @@ class SyncTests(unittest.TestCase):
         result = self.run_sync()
         self.assertState(result, "SYNCED")
         repo = self.repos["web"]
-        self.assertEqual(result["branch"], "task-stageflow-g2")
+        self.assertEqual(result["branch"], "task-mrw-g2")
         self.assertEqual(git(repo, "show", "-s", "--format=%P", "HEAD"), source)
         self.assertEqual(git(repo, "diff", "--name-only", f"{source}...HEAD"), "next.txt")
-        self.assertEqual(submit.remote_heads(repo, "origin", "task", "task-stageflow-g2"), {})
+        self.assertEqual(submit.remote_heads(repo, "origin", "task", "task-mrw-g2"), {})
         self.assertEqual(git(self.sources["web"], "rev-parse", "HEAD"), source)
         self.assertEqual(git(self.sources["web"], "status", "--porcelain"), "")
         self.assertEqual(self.api.create_calls, 0)
@@ -162,7 +162,7 @@ class SyncTests(unittest.TestCase):
         with mock.patch.object(cleanup, "cleanup", side_effect=cleanup.CleanupError("remote unavailable")):
             first = self.run_sync()
         self.assertState(first, "FAILED")
-        self.assertEqual(self.runner().identity("web")["branch"], "task-stageflow-g2")
+        self.assertEqual(self.runner().identity("web")["branch"], "task-mrw-g2")
         self.assertTrue(submit.remote_heads(self.repos["web"], "origin", "task"))
         self.advance_source()
         with mock.patch.object(submit.Runner, "rotate", side_effect=AssertionError("rotated before cleanup")), \
@@ -170,7 +170,7 @@ class SyncTests(unittest.TestCase):
             self.assertState(self.run_sync(), "FAILED")
         last = self.run_sync()
         self.assertState(last, "SYNCED")
-        self.assertEqual(last["branch"], "task-stageflow-g3")
+        self.assertEqual(last["branch"], "task-mrw-g3")
         self.assertEqual(last["retry_count"], 2)
 
     def test_remote_deletion_response_loss_retries_without_new_generation(self):
@@ -324,7 +324,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(result["cleanups"]), 1)
         self.assertNotIn("pending_remote_cleanups", self.runner().identity("web"))
         self.assertEqual(submit.remote_heads(self.repos["web"], "origin", "task"), {})
-        self.assertTrue(submit.remote_heads(self.repos["web"], "origin", "task-stageflow-g2"))
+        self.assertTrue(submit.remote_heads(self.repos["web"], "origin", "task-mrw-g2"))
         self.assertState(self.run_sync(), "SYNCED")
 
     def test_merge_conflict_stops_only_one_repository_before_rotation(self):
@@ -351,7 +351,7 @@ class SyncTests(unittest.TestCase):
         self.assertState(result, "SYNCED")
         self.assertEqual(len(result["cleanups"]), 2)
         self.assertNotIn("pending_remote_cleanups", self.runner().identity("web"))
-        self.assertEqual(submit.remote_heads(self.repos["web"], "origin", "task", "task-stageflow-g2"), {})
+        self.assertEqual(submit.remote_heads(self.repos["web"], "origin", "task", "task-mrw-g2"), {})
 
     def test_open_does_not_cleanup_older_pending_merged_records(self):
         self.publish_and_merge()

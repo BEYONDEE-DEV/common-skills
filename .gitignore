@@ -1,9 +1,6 @@
 __pycache__/
 *.py[cod]
 /.idea/
-/.simple/
-/.stageflow/
-.stageflow/hook-state/
-**/.stageflow/hook-state/
+/.multi-repo-worktree/
 .test-tmp/
 tests/.tmp/

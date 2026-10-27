@@ -75,7 +75,7 @@ class Runner:
             raise PromotionError("promote requires a manifest-bound slot")
         self.bundle = bundle
         self.token = uuid.uuid4().hex
-        self.directory = self.root / ".stageflow-worktrees" / "promotions"
+        self.directory = self.root / ".multi-repo-worktree" / "promotions"
 
     def binding(self, name: str) -> tuple[Path, dict, str, str, str]:
         slot = manifest.require_slot(manifest.load_manifest(manifest.manifest_path(self.root)), self.slot)

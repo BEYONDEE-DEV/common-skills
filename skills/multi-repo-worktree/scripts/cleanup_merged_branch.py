@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Delete one exactly proven merged PR branch from a Stageflow slot."""
+"""Delete one exactly proven merged PR branch from a multi-repo-worktree slot."""
 
 from __future__ import annotations
 

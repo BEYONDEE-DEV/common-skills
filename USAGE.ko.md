@@ -1,163 +1,57 @@
-# Stageflow 사용법
+# BEYONDEE Skills 사용법
 
-설치는 [README.md](./README.md)를 참고하세요. 설치나 업데이트 후에는 새 Codex 스레드에서 사용하세요.
+설치는 [README.md](./README.md)를 참고하세요. 설치나 업데이트 후에는 Codex는 새 스레드에서, Claude Code는 재시작 후 사용하세요.
 
-## 핵심 규칙
+## Multi Repo Worktree
 
-- 새 Stageflow 작업은 요청에 `Stageflow`, `stageflow`, `stage-flow`, `.stageflow` 중 하나를 반드시 포함해야 합니다.
-- `이 작업 계획 세워줘`처럼 일반적으로 말하면 Stageflow가 자동 시작된다고 가정하면 안 됩니다.
-- 가벼운 `plan.md` 중심 흐름을 쓰려면 `Simple Workflow`, `simple-workflow`, `.simple` 중 하나를 명시하세요.
-- `atomic-docs`를 쓰려면 요청에 `atomic-docs`를 명시하세요.
+여러 독립 Git 저장소를 하나의 영구 개발 묶음(slot)으로 관리합니다. 개발 워크트리는 유지하고, PR이 머지되면 로컬 작업 브랜치만 새 세대(`<branch-family>-mrw-g<N>`)로 옮겨 이어서 작업합니다.
 
-## Stageflow 시작
+명시적으로 호출할 때만 동작합니다.
 
-```text
-Stageflow로 이 변경 작업 계획 세워줘.
-```
+| 호스트 | 호출 |
+|---|---|
+| Codex | `$common-skills:multi-repo-worktree <keyword> [요청]` |
+| Claude Code | `/common-skills:multi-repo-worktree <keyword> [요청]` |
 
-```text
-Use Stageflow to plan this change before coding.
-```
+### 키워드
 
-Stageflow는 다음 순서로 진행됩니다.
+| 키워드 | 하는 일 | 쓰기 여부 |
+|---|---|---|
+| `help` | 흐름과 안전 규칙 설명 | 없음 |
+| `status` | 저장소별 브랜치, 세대, PR, 변경상태 조회 | 읽기 전용 |
+| `create` | 영구 slot과 첫 작업 워크트리를 한 번 생성 | 로컬 |
+| `submit` | 작업 커밋(한국어) 후 ready PR 생성, 머지된 PR이 있으면 세대 회전 후 다음 PR 생성 | 로컬·원격 |
+| `sync` | 원격 소스 브랜치 fetch, 머지된 저장소는 세대 회전 후 머지된 PR 브랜치 정리 | 로컬·원격 |
+| `pull` | 원본(소스) 워크트리만 fast-forward | 로컬 |
+| `promote` | 원격 소스 브랜치를 `dev → dev2 → prod` 순서로 fast-forward 승격 | 원격 |
 
-1. `definition`: 요구사항 정의
-2. `implementation-plan`: 구현 계획
-3. `implementation`: 구현 및 완료 검증
-
-각 단계는 리뷰와 사용자 승인이 필요합니다.
-
-## 단계별 확인
-
-요청별 파일은 `.stageflow/requests/<request-id>/` 아래에 생성됩니다.
-
-### 1. Definition
-
-사용자가 할 일:
-
-- Codex가 묻는 요구사항 질문에 답합니다.
-- 요구사항이 충분하면 `질문은 여기까지 하고 구현 계획으로 넘어가자`처럼 말합니다.
-- 리뷰가 통과하면 정의 내용을 보고 승인합니다.
-
-주로 볼 파일:
+### 기본 흐름
 
 ```text
-.stageflow/requests/<request-id>/01-definition/definition.md
+create (최초 1회)
+  → A 개발 → submit (PR A)
+  → 같은 워크트리에서 B 계속 개발
+  → GitHub에서 PR A squash merge
+  → sync 또는 다음 submit: B만 새 세대 브랜치로 이동
+  → submit (PR B) → 반복
 ```
 
-### 2. Implementation Plan
+- PR 머지는 항상 사용자가 GitHub에서 직접 합니다. 자동 머지는 하지 않습니다.
+- force push, reset, 히스토리 재작성은 하지 않습니다.
+- 저장소별로 독립 처리합니다. 한 저장소가 실패하거나 대기 중이어도 나머지 저장소의 성공은 기록됩니다.
+- 회전 중 충돌이 나면 격리된 워크트리에서 양쪽 의도를 보존해 해결한 뒤 이어서 진행합니다.
 
-사용자가 할 일:
-
-- 구현 계획이 정의와 맞는지 봅니다.
-- 빠진 작업, 잘못된 범위, 테스트 부족이 있으면 수정 요청합니다.
-- 문제가 없으면 승인합니다.
-
-주로 볼 파일:
+### 예시
 
 ```text
-.stageflow/requests/<request-id>/02-implementation-plan/implementation-plan.md
+/common-skills:multi-repo-worktree status
+/common-skills:multi-repo-worktree submit 문서 정리 작업 PR 올려줘
+/common-skills:multi-repo-worktree sync
+/common-skills:multi-repo-worktree promote api, web 저장소만 prod까지 올려줘
 ```
 
-### 3. Implementation
+Codex에서는 앞의 `/`를 `$`로 바꿔 사용합니다.
 
-사용자가 할 일:
+### 상태 파일
 
-- 구현 결과와 검증 근거를 봅니다.
-- 계획대로 완료됐는지 확인합니다.
-- 문제가 없으면 완료 승인합니다.
-
-주로 볼 파일:
-
-```text
-.stageflow/requests/<request-id>/03-implementation/implementation.md
-```
-
-## 질문 답변
-
-정의 단계에서 선택지가 나오면 번호나 옵션으로 답하면 됩니다.
-
-```text
-1번은 Option 2, 2번은 Option 1로 해줘.
-```
-
-질문을 끝내고 다음 단계 준비를 시키려면 명시적으로 말합니다.
-
-```text
-질문은 여기까지 하고 구현 계획으로 넘어가자.
-```
-
-이 말은 최종 승인이 아니라 전환 리스크 점검 시작 신호입니다.
-
-## 승인
-
-승인할 때는 명확하게 말합니다.
-
-```text
-승인해. 다음 단계로 진행해줘.
-```
-
-```text
-approve
-```
-
-## 기존 작업 이어가기
-
-```text
-현재 Stageflow 작업 이어서 진행해줘.
-```
-
-```text
-Resume the current Stageflow request.
-```
-
-## Simple Workflow
-
-간단한 계획-리뷰-승인 흐름을 쓰려면 다음처럼 요청합니다.
-
-```text
-Use Simple Workflow to capture requirements, write plan.md, review it internally, and wait for approval.
-```
-
-Simple Workflow는 `.simple/requests/<request-id>/plan.md`를 중심으로 진행하고, 내부 `review.md`가 통과한 뒤 사용자가 `승인`, `진행`, `실행`, `approve`, `proceed`처럼 명확히 말해야 구현으로 넘어갑니다.
-
-## Atomic Docs
-
-전체 문서 생성 또는 교체:
-
-```text
-atomic-docs update all로 이 프로젝트 문서를 작성해줘.
-```
-
-기준 커밋 이후 변경 반영:
-
-```text
-atomic-docs update changed로 최근 코드 변경사항을 문서에 반영해줘.
-```
-
-성공한 `update changed`는 primary `HEAD`의 first-parent 이력에서 마지막 source-impact commit을 `last_full_source_commit`에 기록하므로 다음 실행은 그 이후 source 변경만 확인합니다. source 변경을 검사한 결과 문서 수정이 필요 없는 경우도 성공 기준점을 전진시키지만, Atomic Docs config·managed docs·문서 submodule 포인터만 바뀐 trailing commit에는 기준점을 전진시키지 않습니다. 커밋된 managed docs 변경은 작성자를 추측하지 않고 별도 문서 변경 범위로 검사하며, 작업 전 config·managed docs·문서 submodule이 dirty하면 중단합니다. 다른 config 설정 변경이나 신뢰할 수 없는 source mapping은 자동으로 넘기지 않고 `update all` 또는 명시적 처리가 필요합니다.
-
-대상 지정 갱신:
-
-```text
-atomic-docs update targeted로 checkout-payment Atom만 갱신해줘.
-```
-
-쓰기 없는 점검:
-
-```text
-atomic-docs inspect로 현재 문서와 소스의 차이를 점검해줘.
-```
-
-## 생성 위치
-
-```text
-<docs-root>/atomic-docs.json
-<docs-root>/project/project-goal.md
-<docs-root>/project/project-glossary.md  # 새 개발자에게 정의가 필요한 프로젝트 용어가 있을 때
-<docs-root>/<domain>/*-atom.md
-```
-
-Atomic Docs는 위 config와 managed docs 외에 별도 request/work/review operation 디렉터리를 만들지 않습니다.
-
-Validator와 갱신은 primary project에서 실행합니다. `--config <docs-root>/atomic-docs.json`을 명시할 수 있지만 primary project 안에는 config 후보가 정확히 하나만 있어야 합니다. Submodule 방식에서는 config가 문서 저장소에 함께 보이지만, 해당 저장소만으로 source 검증·갱신하거나 submodule commit·parent gitlink commit·push를 자동 수행하지 않습니다.
+작업 공간 루트의 `.multi-repo-worktree/` 아래에 slot 매니페스트(`slots.json`), 작업 잠금, 세대·충돌 처리용 임시 워크트리, submit/sync/promote 실행 기록이 저장됩니다. 이 디렉터리를 직접 수정하지 마세요.

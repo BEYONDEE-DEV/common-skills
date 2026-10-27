@@ -1,6 +1,0 @@
-interface:
-  display_name: "Simple Workflow"
-  short_description: "Plan with Astra; implement with Astra Light."
-  default_prompt: "Use $simple-workflow to plan and coordinate with Astra, independently challenge plan.md once, and delegate approved write work to Astra Light (gpt-6-astra, low effort)."
-policy:
-  allow_implicit_invocation: true

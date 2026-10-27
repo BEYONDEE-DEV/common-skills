@@ -163,11 +163,11 @@ class SubmitTests(unittest.TestCase):
     def test_preflight_is_read_only_even_when_source_advanced(self):
         self.change()
         before = git(self.repos["web"], "show-ref"), git(self.repos["web"], "status", "--porcelain")
-        state_before = {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()}
+        state_before = {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()}
         result = self.runner().preflight()
         self.assertEqual(result["repositories"][0]["state"], "NONE")
         self.assertEqual(before, (git(self.repos["web"], "show-ref"), git(self.repos["web"], "status", "--porcelain")))
-        self.assertEqual(state_before, {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()})
+        self.assertEqual(state_before, {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()})
 
     def test_submit_and_open_wait_preserve_remote_boundary(self):
         self.change()
@@ -311,7 +311,7 @@ class SubmitTests(unittest.TestCase):
         git(source, "push", "origin", "main")
         result = self.run_plan()
         self.assertState(result, "SUBMITTED")
-        self.assertEqual(self.runner().identity("web")["branch"], "task-stageflow-g2")
+        self.assertEqual(self.runner().identity("web")["branch"], "task-mrw-g2")
         self.assertEqual(self.api.create_calls, 1)
 
     def test_empty_push_lease_does_not_overwrite_concurrently_created_ancestor(self):
@@ -426,7 +426,7 @@ class SubmitTests(unittest.TestCase):
         result = self.run_plan()
         self.assertState(result, "SUBMITTED")
         identity = self.runner().identity("web")
-        self.assertEqual(identity["branch"], "task-stageflow-g2")
+        self.assertEqual(identity["branch"], "task-mrw-g2")
         self.assertEqual(git(self.repos["web"], "show", "-s", "--format=%P", "HEAD"), source_head)
         self.assertEqual(git(source, "rev-parse", "HEAD"), source_head)
         self.assertEqual(git(source, "status", "--porcelain"), "")
@@ -448,7 +448,7 @@ class SubmitTests(unittest.TestCase):
             self.assertState(self.run_plan(), "FAILED")
         repo = self.repos["web"]
         target = git(repo, "rev-parse", "HEAD")
-        self.assertEqual(git(repo, "branch", "--show-current"), "task-stageflow-g2")
+        self.assertEqual(git(repo, "branch", "--show-current"), "task-mrw-g2")
         self.assertState(self.run_plan(), "SUBMITTED")
         self.assertEqual(git(repo, "rev-parse", "HEAD"), target)
 
@@ -520,7 +520,7 @@ class SubmitTests(unittest.TestCase):
         git(source, "push", "origin", "main")
         result = self.run_plan(self.plan(validation=[]))
         self.assertState(result, "SUBMITTED")
-        self.assertEqual(self.runner().identity("web")["branch"], "task-stageflow-g2")
+        self.assertEqual(self.runner().identity("web")["branch"], "task-mrw-g2")
         self.assertFalse(next(p for p in result["phases"] if p["phase"] == "validation")["executed"])
 
     def test_prepare_generates_snapshot_and_skips_unselected_clean_remote_queries(self):
@@ -622,7 +622,7 @@ class SubmitTests(unittest.TestCase):
         self.advance_source()
         first = self.run_plan(self.plan(validation=[], pr_title=""))
         self.assertState(first, "FAILED")
-        self.assertEqual(self.runner().identity("web")["branch"], "task-stageflow-g2")
+        self.assertEqual(self.runner().identity("web")["branch"], "task-mrw-g2")
         second = self.run_plan(self.plan(validation=[]))
         self.assertState(second, "FAILED")
         self.assertEqual(second["error_code"], "REVALIDATION_REQUIRED")

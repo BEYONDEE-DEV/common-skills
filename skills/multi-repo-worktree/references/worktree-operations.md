@@ -31,9 +31,9 @@ An explicit write-keyword request authorizes that keyword's routine writes. `sta
 5. Re-inspect relevant identities immediately before fetch, branch/ref, manifest, or remote publication.
 6. Execute and record repository-local results. A repository-local wait/conflict/failure does not roll back or suppress a valid sibling.
 
-Do not ask for routine commands, task-related path lists, generated Korean text, or manifest-proven transitions. Ask one consolidated question only for conflicting permanent facts, ambiguous/secret/unrelated content, an inseparable PR correction, stale-lock recovery, or conflict recovery.
+Do not ask for routine commands, task-related path lists, generated Korean text, or manifest-proven transitions. Ask one consolidated question only for conflicting permanent facts, ambiguous/secret/unrelated content, an inseparable PR correction, stale-lock recovery, or a substantive unresolved behavior choice inside a conflict. Routine generation conflicts use `conflict-recovery.md` automatically.
 
-Never reset, clean, force checkout, force push to rewrite a branch, rewrite published history, amend, stash, or auto-resolve conflicts. `promote` uses an exact expected-head update lease only after independently proving fast-forward ancestry; it never rewrites history or recreates a deleted branch. A clean internal correction worktree and its unpublished temporary local branch may be removed after exact remote and manifest verification. A journaled internal generation worktree may be populated from the exact result tree and removed without force only after its source/index/tree/HEAD are proven. Every common rotation retires only its journal-proven old local generation after the target is switched and verified. During explicit `sync`, an exact merged remote PR ref may also be removed; a legacy local ref may be removed only with exact completed-rotation proof. The cleanup remote operation is an expected-head deletion lease, not permission to update or rewrite a branch. These are bounded routine cleanups, not slot release.
+Never reset, clean, force checkout, force push to rewrite a branch, rewrite published history, amend, or stash. Resolve routine generation conflicts automatically in the runner-owned isolated worktree, preserving both intents and passing focused validation as described in `conflict-recovery.md`. `promote` uses an exact expected-head update lease only after independently proving fast-forward ancestry; it never rewrites history or recreates a deleted branch. A clean internal correction worktree and its unpublished temporary local branch may be removed after exact remote and manifest verification. A journaled internal generation worktree may be populated from the exact result tree and removed without force only after its source/index/tree/HEAD are proven. An exact clean conflict worktree may be removed after its recorded hooked commit is preserved by the verified target. Every common rotation retires only its journal-proven old local generation after the target is switched and verified. During explicit `sync`, an exact merged remote PR ref may also be removed; a legacy local ref may be removed only with exact completed-rotation proof. The cleanup remote operation is an expected-head deletion lease, not permission to update or rewrite a branch. These are bounded routine cleanups, not slot release.
 
 ## Roles And Generation-Branch Flow
 
@@ -58,7 +58,7 @@ There is no slot freeze, release, reassignment, or task-start `create`. The slot
 
 ## Permanent Slot Manifest
 
-`<workspace-root>/.stageflow-worktrees/slots.json` uses schema 5:
+`<workspace-root>/.multi-repo-worktree/slots.json` uses schema 5:
 
 ```json
 {
@@ -89,7 +89,7 @@ There is no slot freeze, release, reassignment, or task-start `create`. The slot
 }
 ```
 
-- `branch_family` is permanent naming input. The initial branch may equal the family; every rotation target is exactly `<branch-family>-stageflow-g<branch-generation>`.
+- `branch_family` is permanent naming input. The initial branch may equal the family; every rotation target is exactly `<branch-family>-mrw-g<branch-generation>`.
 - `branch_generation` counts local branch rotations independently of PR `generation`.
 - `branch_base_sha` is the remote source commit on which the active branch was last prepared. It is the explicit base for an unsubmitted or already-rotated branch.
 - PR generation `0` requires `pr: null` and `submission: null`. Positive PR generations require both a PR and exact submission evidence.
@@ -107,11 +107,11 @@ Example journal:
   "boundary_sha": "2222222222222222222222222222222222222222",
   "source_sha": "4444444444444444444444444444444444444444",
   "source_tree_sha": "6666666666666666666666666666666666666666",
-  "target_branch": "feature-etc-docs-stageflow-g2",
+  "target_branch": "feature-etc-docs-mrw-g2",
   "target_branch_generation": 2,
   "result_tree_sha": "5555555555555555555555555555555555555555",
   "transfer_subject": "feat(events): 이벤트 필터 상태 보존",
-  "temporary_worktree": "/workspace/.stageflow-worktrees/generation-worktrees/<sha256-slot-repo-target>.worktree"
+  "temporary_worktree": "/workspace/.multi-repo-worktree/generation-worktrees/<sha256-slot-repo-target>.worktree"
 }
 ```
 
@@ -253,7 +253,7 @@ Ordinary OPEN submit never pushes the local active branch. After the common phas
 Only an explicit correction intent enters correction mode. Before writing, require the user-provided/inspected correction paths or patch to be semantically separable from future work. If a path contains both, ask one decision and do not guess.
 
 1. Re-fetch and require remote PR head equals manifest `observed_head_sha`.
-2. Create a unique internal local branch/worktree from that observed head, outside the development bundle but under `.stageflow-worktrees/corrections/`.
+2. Create a unique internal local branch/worktree from that observed head, outside the development bundle but under `.multi-repo-worktree/corrections/`.
 3. Apply only the proven correction patch, inspect it, commit with Korean text, and verify the development worktree HEAD/tree remains byte-for-byte unchanged.
 4. Push the correction commit as a normal fast-forward to the existing remote PR head ref. Never force push.
 5. Verify the same PR remains OPEN/ready and points to the new SHA, then call `record-correction`. This changes only `observed_head_sha`; it never changes `continuation_boundary_sha`.
@@ -280,7 +280,7 @@ Preconditions:
 
 - development worktree is clean and its HEAD/branch equal inspected manifest values;
 - boundary, local HEAD, and pinned source objects exist;
-- target generation is `branch_generation + 1` and target name is exactly `<branch-family>-stageflow-g<target-generation>`;
+- target generation is `branch_generation + 1` and target name is exactly `<branch-family>-mrw-g<target-generation>`;
 - no in-progress journal conflicts with the requested transition.
 
 First compute the result tree without changing refs, index, worktree, or current branch:
@@ -292,13 +292,13 @@ python3 "<skill-dir>/scripts/prepare_generation_branch.py" analyze \
   --branch-family "<branch-family>" --target-generation "<next-generation>"
 ```
 
-The helper runs a 3-way tree merge with explicit base=`boundary`, ours=`pinned source`, theirs=`local HEAD`. A conflict returns failure before a target ref or worktree change. Do not resolve automatically.
+The helper runs a 3-way tree merge with explicit base=`boundary`, ours=`pinned source`, theirs=`local HEAD`. A conflict creates no target or development worktree changes; the runner prepares an owned isolated conflict worktree and returns `CONFLICT_RESOLUTION_REQUIRED`. Follow `conflict-recovery.md` without another routine approval. The agent records the reconciled tree through normal commit hooks, then the runner consumes that exact source-parented commit in its journaled rotation and requires passing focused checks before publication/completion.
 
 The analyze result includes both `source_tree_sha` and `result_tree_sha`. If they match, record `transfer_subject: null`, omit `--message`, and create no transfer commit. Otherwise inspect the B-only net diff and task context and choose one concise subject for the user-visible outcome. Summarize multiple B commits as one result; describe rename/delete by the resulting behavior; exclude correction A, branch/base movement, and source provenance. Follow the repository's required commit syntax first and include Korean meaning when compatible. If repository policy and the intended meaning cannot coexist, block only that repository and ask the user; never bypass hooks. Do not add source/boundary trailers because the manifest owns that provenance.
 
 Before journaling, reject CR/LF, ASCII controls, blank values, and known unresolved workflow placeholders, then trim only outer ASCII spaces. The helper does not use regex to judge the natural-language meaning, Korean content, or repository convention. The normalized subject is part of rotation retry identity, so a different subject is not an exact retry even when the result tree is unchanged.
 
-Derive the one allowed temporary path as `<workspace-root>/.stageflow-worktrees/generation-worktrees/<sha256(slot NUL repo NUL target)>.worktree`. Use lowercase SHA-256 hex and the `.worktree` suffix. This path is outside user repositories and is owned only by this exact slot/repository/target rotation. Journal the exact plan before ref mutation; `begin-rotation` rejects every other or non-normalized path:
+Derive the one allowed temporary path as `<workspace-root>/.multi-repo-worktree/generation-worktrees/<sha256(slot NUL repo NUL target)>.worktree`. Use lowercase SHA-256 hex and the `.worktree` suffix. This path is outside user repositories and is owned only by this exact slot/repository/target rotation. Journal the exact plan before ref mutation; `begin-rotation` rejects every other or non-normalized path:
 
 ```bash
 python3 "<skill-dir>/scripts/slot_manifest.py" --root "<workspace-root>" \
@@ -400,7 +400,7 @@ python3 "<skill-dir>/scripts/slot_manifest.py" --root "<workspace-root>" \
   "<deterministic-absolute-temporary-worktree>"
 ```
 
-If the old temporary commit has an unsuitable mechanical subject, discard it only when the re-read phase is `planned`, target ref is absent, and `inspect-legacy` proves the deterministic Stageflow-owned worktree is detached, exact, and clean:
+If the old temporary commit has an unsuitable mechanical subject, discard it only when the re-read phase is `planned`, target ref is absent, and `inspect-legacy` proves the deterministic runner-owned worktree is detached, exact, and clean:
 
 ```bash
 python3 "<skill-dir>/scripts/prepare_generation_branch.py" discard-legacy-temporary \
@@ -437,7 +437,7 @@ For ordinary sync, use `scripts/sync_bundle.py` following `sync-runner.md`. It o
 - **OPEN**: verify exact PR/base/head and fetch source, then report `PR 병합 대기`. Do not rotate, switch, stage, commit, push, or mutate submission evidence even when source advanced.
 - **MERGED, not yet rotated** (`branch == submission.head_branch`): use `submission.continuation_boundary_sha`, rotate future work onto pinned source, retire the old local generation, complete the rotation receipt, then clean the exact remote submitted ref.
 - **MERGED, already rotated** (`branch != submission.head_branch`): clean or retry cleanup of the submitted branch first. Only after both old refs are absent, use `branch_base_sha` and rotate again if pinned source advanced.
-- **mixed bundle**: run each rule independently. A waiting or dirty OPEN repository does not stop an eligible clean NONE/MERGED sibling. A dirty repository or repository-local 3-way conflict is reported `failed/skipped unchanged` and does not undo recorded sibling success.
+- **mixed bundle**: run each rule independently. A waiting or dirty OPEN repository does not stop an eligible clean NONE/MERGED sibling. A dirty repository is reported `failed/skipped unchanged`; a repository-local 3-way conflict supplies isolated recovery so the agent can resolve/validate/resume it while recorded sibling successes remain complete.
 
 Dirty `sync` does not stash or make a WIP commit. Report the dirty paths unchanged. After the relevant PR is merged, a later `submit` may commit clearly task-related paths with Korean text and call the same common rotation.
 

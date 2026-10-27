@@ -1,11 +1,11 @@
 {
-  "name": "stage-flow",
+  "name": "beyondee",
   "interface": {
-    "displayName": "Stage Flow"
+    "displayName": "BEYONDEE"
   },
   "plugins": [
     {
-      "name": "stageflow",
+      "name": "common-skills",
       "source": {
         "source": "local",
         "path": "./"

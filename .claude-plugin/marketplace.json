@@ -1,0 +1,17 @@
+{
+  "name": "beyondee",
+  "owner": {
+    "name": "BEYONDEE"
+  },
+  "metadata": {
+    "description": "BEYONDEE shared agent skills."
+  },
+  "plugins": [
+    {
+      "name": "common-skills",
+      "source": "./",
+      "description": "BEYONDEE shared agent skills for Codex and Claude Code.",
+      "category": "productivity"
+    }
+  ]
+}

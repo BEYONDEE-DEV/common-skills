@@ -150,7 +150,7 @@ def retire_locked(
     old_branch = rotation["from_branch"]
     target_branch = rotation["target_branch"]
     expected_old_head = rotation["from_head_sha"]
-    expected_target = f"{identity['branch_family']}-stageflow-g{rotation['target_branch_generation']}"
+    expected_target = f"{identity['branch_family']}-mrw-g{rotation['target_branch_generation']}"
     if target_branch != expected_target:
         raise RetirementError("rotation target is not deterministic for the manifest family")
     if identity["branch"] != old_branch or identity["branch_generation"] != rotation["from_branch_generation"]:

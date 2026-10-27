@@ -14,8 +14,6 @@ SKIP_DIRS = {
     ".gradle",
     ".idea",
     ".run",
-    ".simple",
-    ".stageflow",
     "build",
     "dist",
     "node_modules",

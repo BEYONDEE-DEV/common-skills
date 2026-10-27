@@ -1,95 +1,84 @@
-# Stageflow Plugin
+# BEYONDEE Skills
 
-Stageflow is a Codex plugin for request definition, implementation planning, implementation review, and atomic project documentation workflows.
+BEYONDEE Skills is a shared agent-skill plugin that works in both **Codex** and **Claude Code** from one repository.
 
-It also bundles Simple Workflow as a lightweight `plan.md`-centered workflow alongside the full Stageflow flow.
+| Item | Value |
+|---|---|
+| Plugin name | `common-skills` |
+| Repository | `BEYONDEE-DEV/common-skills` |
+| Marketplace name | `beyondee` |
+| Codex manifest | `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json` |
+| Claude Code manifest | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
+| Skills | `skills/<skill-name>/SKILL.md` (shared by both hosts) |
 
-## Installation
+## Included Skills
 
-The plugin name is `stageflow`, and the marketplace name is `stage-flow`.
+| Skill | Codex | Claude Code |
+|---|---|---|
+| Multi Repo Worktree | `$common-skills:multi-repo-worktree <keyword>` | `/common-skills:multi-repo-worktree <keyword>` |
 
-### Method 1: Use a Local Clone
+Multi Repo Worktree manages a permanent development bundle of independent Git repositories. Keywords: `help`, `status`, `create`, `submit`, `promote`, `pull`, `sync`. See [USAGE.ko.md](./USAGE.ko.md).
 
-Use this when you want to inspect or edit the plugin source locally.
+The skill scripts require Python 3.9+, `git`, and an authenticated `gh` CLI.
+
+## Install in Codex
+
+From a local clone:
 
 ```bash
-git clone git@github.com:BEYONDEE-DEV/stage-flow-plugin.git
-cd stage-flow-plugin
-
+git clone git@github.com:BEYONDEE-DEV/common-skills.git
+cd common-skills
 codex plugin marketplace add "$(pwd)"
-codex plugin add stageflow@stage-flow
+codex plugin add common-skills@beyondee
 ```
 
-If you prefer HTTPS:
+Directly from Git:
 
 ```bash
-git clone https://github.com/BEYONDEE-DEV/stage-flow-plugin.git
-cd stage-flow-plugin
-
-codex plugin marketplace add "$(pwd)"
-codex plugin add stageflow@stage-flow
+codex plugin marketplace add git@github.com:BEYONDEE-DEV/common-skills.git --ref main
+codex plugin add common-skills@beyondee
 ```
 
-### Method 2: Use the Git Marketplace Directly
+Verify with `codex plugin list`; you should see `common-skills@beyondee  installed, enabled`. Start a new Codex thread after installing or updating.
 
-Use this when you want to install the plugin without keeping a local clone.
+## Install in Claude Code
+
+From a local clone:
 
 ```bash
-codex plugin marketplace add git@github.com:BEYONDEE-DEV/stage-flow-plugin.git --ref main
-codex plugin add stageflow@stage-flow
+claude plugin marketplace add "$(pwd)"
+claude plugin install common-skills@beyondee
 ```
 
-If you prefer HTTPS:
+Directly from GitHub:
 
 ```bash
-codex plugin marketplace add https://github.com/BEYONDEE-DEV/stage-flow-plugin.git --ref main
-codex plugin add stageflow@stage-flow
+claude plugin marketplace add BEYONDEE-DEV/common-skills
+claude plugin install common-skills@beyondee
 ```
 
-## Verify Installation
-
-```bash
-codex plugin list
-```
-
-You should see:
-
-```text
-stageflow@stage-flow  installed, enabled
-```
-
-## Included Workflows
-
-- Stageflow: use `Stageflow`, `stageflow`, `stage-flow`, or `.stageflow`.
-- Simple Workflow: use `Simple Workflow`, `simple-workflow`, or `.simple`.
-- Atomic Docs: use `atomic-docs`.
-- Multi Repo Worktree: use `$stageflow:multi-repo-worktree` for permanent development bundles, PR submission, synchronization, and branch promotion.
-
-For an existing slot, `$stageflow:multi-repo-worktree promote` advances each selected repository's remote source branch through `dev → dev2 → prod`. The source is taken from that repository's slot configuration; a source already on this path skips prior stages. The command prepares a reviewable snapshot, uses fast-forward pushes, and records partial progress for retry while local development continues. It finishes at remote `prod` branch reflection. Divergent histories require separate integration; existing branch protection still applies.
-
-### Simple Workflow Roles
-
-Simple Workflow defaults to `gpt-6-astra` as the main planner/coordinator at its existing effort and dispatches approved write work to a separate `gpt-6-astra` implementation subagent with explicit `reasoning_effort: "low"` (Astra Light). Independent reviewers inherit the main agent's model and effort; they do not use the implementation worker's Light setting. The main agent owns the plan, one independent plan challenge, user approval, Goal and workflow metadata, and final review; the implementation worker owns bounded code changes and affected tests, retaining its model/effort through fix and revalidation rounds.
-
-The skill cannot switch the model of an already-running main task. Select Astra when starting the task if that exact main role is required. Explicit user role-specific model/effort choices take precedence, and unavailable or unverifiable settings are reported rather than silently substituted. Plan-only and read-only requests do not dispatch the implementation worker. After delivering a reviewed plan-only result, the workflow preserves that plan but deactivates its session pointer so unrelated follow-ups are not captured; executing it later requires explicit reactivation and execution approval.
+Inside an interactive Claude Code session the same steps are `/plugin marketplace add <source>` and `/plugin install common-skills@beyondee`. Restart Claude Code after installing or updating.
 
 ## Update
 
-For a local clone:
+| Host | Local clone | Git marketplace |
+|---|---|---|
+| Codex | `git pull`, then `codex plugin add common-skills@beyondee` | `codex plugin marketplace upgrade`, then `codex plugin add common-skills@beyondee` |
+| Claude Code | `git pull`, then `claude plugin marketplace update beyondee` | `claude plugin marketplace update beyondee` |
+
+## Adding a Skill
+
+1. Create `skills/<skill-name>/SKILL.md` with `name` and `description` frontmatter. Both hosts read this file.
+2. Optionally add `skills/<skill-name>/agents/openai.yaml` for Codex display metadata and implicit-invocation policy. Claude Code ignores it, so state invocation limits in the `description` as well.
+3. Resolve bundled files from the skill directory (`<skill-dir>`), never from the session cwd.
+4. Avoid host-only tools in the skill body, or describe the equivalent for each host.
+5. Bump `version` in both `.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` (kept identical by `tests/test_plugin_marketplace.py`).
+
+## Development
 
 ```bash
-git pull
-codex plugin add stageflow@stage-flow
+python3 -m unittest tests/test_*.py
 ```
-
-For a Git marketplace install:
-
-```bash
-codex plugin marketplace upgrade
-codex plugin add stageflow@stage-flow
-```
-
-After installing or updating, start a new Codex thread so newly loaded skills and tools are available.
 
 ## Notes
 

@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import inspect_worktrees as inspector
+import generation_conflicts as conflicts
 import prepare_generation_branch as generation
 import retire_generation_branch as retirement
 import slot_manifest as manifest
@@ -124,7 +125,7 @@ class Runner:
             raise SubmitError("submit requires a manifest-bound slot")
         self.bundle = bundle
         self.path = manifest.manifest_path(self.root)
-        self.receipt_path = self.root / ".stageflow-worktrees" / "submissions" / (digest(self.slot) + ".json")
+        self.receipt_path = self.root / ".multi-repo-worktree" / "submissions" / (digest(self.slot) + ".json")
         self.api = api or verifier.GitHub()
         self.token = uuid.uuid4().hex
         self.test = test
@@ -312,7 +313,7 @@ class Runner:
         row["plan"] = plan
 
     def write_plan(self, plans: dict) -> Path:
-        path = self.root / ".stageflow-worktrees" / "submit-plans" / (uuid.uuid4().hex + ".json")
+        path = self.root / ".multi-repo-worktree" / "submit-plans" / (uuid.uuid4().hex + ".json")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8", errors="backslashreplace") as stream:
             json.dump({"repositories": plans}, stream, ensure_ascii=False, indent=2)
@@ -326,7 +327,7 @@ class Runner:
                 continue
             try:
                 plan, committed = row["plan"], row["committed_review"]
-                directory = self.root / ".stageflow-worktrees" / "submit-plans" / (uuid.uuid4().hex + ".review")
+                directory = self.root / ".multi-repo-worktree" / "submit-plans" / (uuid.uuid4().hex + ".review")
                 row["review_path"] = review.write_material(Path(row["path"]), directory,
                     head=plan["expected_head"], boundary=committed["boundary_sha"],
                     committed_head=committed["head_sha"], include_committed=row["state"] != "OPEN")
@@ -461,22 +462,36 @@ class Runner:
             boundary = identity["submission"]["continuation_boundary_sha"] if unrotated else identity["branch_base_sha"]
             if not unrotated and source == boundary:
                 return expected_head
-            a = generation.analyze(argparse.Namespace(repo=repo, from_head=expected_head,
-                boundary=boundary, source=source, branch_family=identity["branch_family"],
-                target_generation=identity["branch_generation"] + 1))
-            transfer = generation.normalize_transfer_subject(subject) if a["source_tree_sha"] != a["result_tree_sha"] else None
+            resolved = None
+            try:
+                a = generation.analyze(argparse.Namespace(repo=repo, from_head=expected_head,
+                    boundary=boundary, source=source, branch_family=identity["branch_family"],
+                    target_generation=identity["branch_generation"] + 1))
+            except generation.GenerationConflict as exc:
+                resolved = conflicts.prepare(self.root, self.slot, name, self.token, exc.context)
+                if resolved["state"] != "ready":
+                    raise conflicts.ConflictResolutionRequired({**resolved, "suggested_subject": subject}) from exc
+                a = {**exc.context, "result_tree_sha": resolved["result_tree_sha"]}
+            transfer = (resolved["transfer_subject"] if resolved else
+                generation.normalize_transfer_subject(subject) if a["source_tree_sha"] != a["result_tree_sha"] else None)
             temporary = manifest.generation_worktree_path(self.root, self.slot, name, a["target_branch"])
             self.mutate(lambda data: manifest.begin_rotations(data, self.slot, [(name, identity["branch"],
                 identity["branch_generation"], a["from_head_sha"], boundary, source, a["source_tree_sha"],
                 a["target_branch"], a["target_branch_generation"], a["result_tree_sha"], transfer, str(temporary))], self.root))
             rotation = self.identity(name)["rotation"]
+        resolved = conflicts.for_rotation(self.root, self.slot, name, self.token, rotation)
+        if resolved is not None:
+            self.receipts.setdefault(name, {})["conflict_validation_required"] = True
+            self.receipts[name]["revalidation_required"] = True
+            self.save()  # A resumed/empty resolution must not silently skip validation.
         if before_change is not None:
             before_change(rotation["result_tree_sha"])
         args = argparse.Namespace(repo=repo, source=rotation["source_sha"], source_tree=rotation["source_tree_sha"],
             result_tree=rotation["result_tree_sha"], branch_family=identity["branch_family"],
             target_generation=rotation["target_branch_generation"], message=rotation["transfer_subject"],
             temporary_worktree=Path(rotation["temporary_worktree"]), workspace_root=self.root,
-            slot=self.slot, repository=name)
+            slot=self.slot, repository=name, token=self.token,
+            prepared_commit=resolved["commit_sha"] if resolved is not None else None)
         if rotation["phase"] == "planned":
             if g(repo, "branch", "--show-current") != rotation["from_branch"] or g(repo, "rev-parse", "HEAD") != rotation["from_head_sha"]:
                 raise SubmitError("rotation source moved")
@@ -503,6 +518,7 @@ class Runner:
             retirement.retire(argparse.Namespace(root=self.root, slot=self.slot, repository=name,
                                                  token=self.token, execute=True))
             rotation = self.identity(name)["rotation"]
+        conflicts.cleanup(self.root, self.slot, name, self.token, rotation)
         self.mutate(lambda data: manifest.complete_rotation(data, self.slot, name,
             rotation["target_branch"], rotation["target_branch_generation"], rotation["source_sha"],
             rotation["target_head_sha"], rotation["result_tree_sha"]))
@@ -532,7 +548,7 @@ class Runner:
             raise SubmitError("validation_mode must be if-changed or always")
         receipt = self.receipts.setdefault(name, {})
         changed = self.validation_trees.get(name) != tree
-        required = changed or bool(receipt.get("revalidation_required"))
+        required = changed or bool(receipt.get("revalidation_required")) or bool(receipt.get("conflict_validation_required"))
         item = self.timings[-1]
         item.update(mode=mode, tree_changed=changed)
         if not self.test and mode != "always" and not required:
@@ -561,6 +577,7 @@ class Runner:
             raise SubmitError("validation changed its input basis")
         self.validation_trees[name] = tree
         receipt.pop("revalidation_required", None)
+        receipt.pop("conflict_validation_required", None)
         self.save()
 
     def check_publication(self, name: str, pending: dict, *, recovering: bool,
@@ -770,6 +787,9 @@ class Runner:
         self.checkpoint(name, plan, expected_head)
         identity = self.identity(name)
         if not verifier.git(repo, "diff", "--name-only", f"{source}...HEAD", "--"):
+            if self.receipts.get(name, {}).get("conflict_validation_required"):
+                with self.phase("validation"):
+                    self.validate(name, repo, source, plan, expected_head)
             return self.no_diff(name, identity["branch"])
         title, body = korean(plan.get("pr_title"), "pr_title"), korean(plan.get("pr_body"), "pr_body")
         with self.phase("validation"):
@@ -783,6 +803,9 @@ class Runner:
                 source, identity = refreshed, self.identity(name)
             self.checkpoint(name, plan, expected_head)
             if not verifier.git(repo, "diff", "--name-only", f"{source}...HEAD", "--"):
+                if self.receipts.get(name, {}).get("conflict_validation_required"):
+                    with self.phase("validation"):
+                        self.validate(name, repo, source, plan, expected_head)
                 return self.no_diff(name, identity["branch"])
             with self.phase("validation"):
                 self.validate(name, repo, source, plan, expected_head)
@@ -829,6 +852,8 @@ class Runner:
                                             "VERIFICATION_FAILED" if failed_phase == "verify_pr" else
                                             "VALIDATION_FAILED" if failed_phase == "validation" else "SUBMIT_FAILED",
                               "failed_phase": failed_phase}
+                    if isinstance(exc, conflicts.ConflictResolutionRequired):
+                        result.update(error_code="CONFLICT_RESOLUTION_REQUIRED", conflict_recovery=exc.recovery)
                     try:
                         resume = (receipt["pending"].get("inputs", plan) if receipt.get("pending")
                                   else self.resume_plan(name))

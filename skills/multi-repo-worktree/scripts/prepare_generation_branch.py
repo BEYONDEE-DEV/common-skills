@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and verify one Stageflow generation branch without rewriting refs."""
+"""Prepare and verify one generation branch without rewriting refs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,13 @@ class TransitionError(RuntimeError):
     pass
 
 
-GENERATION_WORKTREES_RELATIVE_PATH = Path(".stageflow-worktrees") / "generation-worktrees"
+class GenerationConflict(TransitionError):
+    def __init__(self, context: dict[str, Any]):
+        self.context = context
+        super().__init__("generation tree conflicts; no branch was changed: " + ", ".join(context["conflict_paths"]))
+
+
+GENERATION_WORKTREES_RELATIVE_PATH = Path(".multi-repo-worktree") / "generation-worktrees"
 KNOWN_TRANSFER_SUBJECT_PLACEHOLDERS = (
     "<source-branch>",
     "<source_branch>",
@@ -58,7 +64,7 @@ def ref_target(repo: Path, branch: str) -> str | None:
 def expected_target(branch_family: str, target_generation: int) -> str:
     if not branch_family or target_generation <= 1:
         raise TransitionError("target generation must be greater than one")
-    return f"{branch_family}-stageflow-g{target_generation}"
+    return f"{branch_family}-mrw-g{target_generation}"
 
 
 def validate_target(repo: Path, branch: str) -> None:
@@ -150,7 +156,7 @@ def validate_temporary_worktree(
     expected = expected_temporary_worktree(workspace_root, slot, repository, target)
     if str(value) != str(expected) or temporary != expected:
         raise TransitionError(
-            f"temporary generation worktree does not match its Stageflow journal identity: {expected}"
+            f"temporary generation worktree does not match its generation journal identity: {expected}"
         )
     if temporary == repo or repo in temporary.parents or temporary in repo.parents:
         raise TransitionError("temporary generation worktree must be outside the repository worktree")
@@ -264,16 +270,31 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "merge-tree",
         "--write-tree",
         "--messages",
+        "-z",
         "--merge-base",
         boundary,
         source,
         from_head,
         check=False,
     )
+    fields = merge.stdout.split("\0")
+    if merge.returncode == 1 and fields and len(fields[0]) in (40, 64):
+        entries = []
+        for field in fields[1:]:
+            if not field:
+                break
+            entries.append(field)
+        if entries:
+            object_id(repo, fields[0], "^{tree}")
+            raise GenerationConflict({"from_head_sha": from_head, "boundary_sha": boundary,
+                "source_sha": source, "source_tree_sha": object_id(repo, source, "^{tree}"),
+                "target_branch": target, "target_branch_generation": args.target_generation,
+                "conflict_tree_sha": fields[0], "conflict_entries": entries,
+                "conflict_paths": sorted({entry.split("\t", 1)[1] for entry in entries})})
     if merge.returncode != 0:
         detail = merge.stdout.strip() or merge.stderr.strip() or "3-way tree conflict"
         raise TransitionError(f"generation tree conflicts; no branch was changed: {detail}")
-    lines = merge.stdout.splitlines()
+    lines = fields
     if not lines:
         raise TransitionError("merge-tree returned no result tree")
     result_tree = lines[0].strip()
@@ -347,7 +368,24 @@ def create(args: argparse.Namespace) -> dict[str, Any]:
             "created": False,
         }
 
-    if result_tree == source_tree:
+    prepared = getattr(args, "prepared_commit", None)
+    if prepared is not None:
+        import generation_conflicts
+        import slot_manifest
+        token = getattr(args, "token", None)
+        slot_manifest.require_operation_lock(args.workspace_root, args.slot, token)
+        state = slot_manifest.require_slot(slot_manifest.load_manifest(slot_manifest.manifest_path(args.workspace_root)), args.slot)
+        receipt = generation_conflicts.for_rotation(args.workspace_root, args.slot, args.repository,
+                                                   token, state["repositories"][args.repository]["rotation"])
+        if receipt is None or receipt["commit_sha"] != prepared:
+            raise TransitionError("prepared commit requires its exact recorded conflict recovery")
+    if prepared is not None and not compatible_target(repo, prepared, source, result_tree, transfer_subject):
+        raise TransitionError("prepared resolution commit does not match source/tree/subject")
+    if prepared is not None:
+        if temporary in registered_worktrees(repo) or temporary.exists():
+            raise TransitionError("prepared resolution has an unexpected generation worktree")
+        commit = prepared
+    elif result_tree == source_tree:
         if temporary in registered_worktrees(repo) or temporary.exists():
             raise TransitionError(
                 f"empty transfer has an unexpected journaled temporary worktree: {temporary}"
@@ -677,6 +715,8 @@ def parser() -> argparse.ArgumentParser:
         subparser.add_argument("--target-generation", required=True, type=int)
         subparser.add_argument("--message")
         if name == "create":
+            subparser.add_argument("--prepared-commit")
+            subparser.add_argument("--token")
             subparser.add_argument("--temporary-worktree", required=True, type=Path)
             subparser.add_argument("--workspace-root", required=True, type=Path)
             subparser.add_argument("--slot", required=True)

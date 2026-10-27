@@ -1,0 +1,10 @@
+{
+  "name": "common-skills",
+  "version": "0.2.0",
+  "description": "BEYONDEE shared agent skills for Codex and Claude Code.",
+  "author": {
+    "name": "BEYONDEE"
+  },
+  "repository": "https://github.com/BEYONDEE-DEV/common-skills",
+  "keywords": ["git", "worktree", "multi-repo", "pull-request", "release"]
+}

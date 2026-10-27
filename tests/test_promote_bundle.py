@@ -95,11 +95,11 @@ class PromotionTests(unittest.TestCase):
         task = self.tasks["web"]
         (task / "future.txt").write_text("B stays local\n")
         before = git(task, "show-ref"), git(task, "status", "--porcelain"), self.refs()
-        metadata = {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()}
+        metadata = {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()}
         result = self.runner().inspect()
         self.assertEqual(result["repositories"][0]["state"], "READY")
         self.assertEqual(before, (git(task, "show-ref"), git(task, "status", "--porcelain"), self.refs()))
-        self.assertEqual(metadata, {str(p): p.read_bytes() for p in (self.root / ".stageflow-worktrees").rglob("*") if p.is_file()})
+        self.assertEqual(metadata, {str(p): p.read_bytes() for p in (self.root / ".multi-repo-worktree").rglob("*") if p.is_file()})
 
     def test_promote_preserves_task_B_original_worktree_and_manifest(self):
         task, original = self.tasks["web"], self.sources["web"]

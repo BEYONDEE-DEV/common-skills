@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import cleanup_merged_branch as cleanup
+import generation_conflicts as conflicts
 import slot_manifest as manifest
 import submit_bundle as shared
 import verify_pr as verifier
@@ -28,10 +29,11 @@ ERRORS = (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.Sub
 
 class Runner:
     def __init__(self, root: Path, bundle: str, api: verifier.GitHub | None = None):
-        # Reuse only inspection, identity, timing, fetch, and rotation mechanics.
-        # Never call submit.execute/commit/publish or modify its publication receipts.
+        # Reuse inspection, identity, timing, fetch, rotation, and required checks.
+        # Never call submit.execute/commit/publish or change pending publication.
+        # Conflict rotation may persist shared required-validation flags only.
         self.context = shared.Runner(root, bundle, api=api)
-        self.report_path = self.context.root / ".stageflow-worktrees" / "sync-runs" / (shared.digest(self.context.slot) + ".json")
+        self.report_path = self.context.root / ".multi-repo-worktree" / "sync-runs" / (shared.digest(self.context.slot) + ".json")
 
     def preflight(self) -> dict:
         result = self.context.preflight(content_snapshot=False, skip_dirty=True)
@@ -198,6 +200,8 @@ class Runner:
             progress["rotations"].append({"branch": branch, "head_sha": head, "resumed": True})
             self.guard(name, identity, plan, head, branch, source=source)
 
+        self.validate_conflict(name, plan, source, head)
+
         unrotated = identity["pr"] and identity["branch"] == identity["submission"]["head_branch"]
         # Complete cleanup BEFORE replacing an already-completed rotation receipt.
         if not unrotated:
@@ -211,10 +215,17 @@ class Runner:
             branch = identity["branch"]
             progress["rotations"].append({"branch": branch, "head_sha": head, "resumed": False})
             self.guard(name, identity, plan, head, branch, source=source)
+            self.validate_conflict(name, plan, source, head)
         if unrotated:
             self.clean_merged(name, plan, source, head, branch, progress)
         return {"state": "SYNCED" if progress["rotations"] or any(c["status"] == "deleted" for c in progress["cleanups"])
                 else "NOOP", "branch": branch, "head_sha": head}
+
+    def validate_conflict(self, name: str, plan: dict, source: str, head: str) -> None:
+        ctx = self.context
+        if ctx.receipts.get(name, {}).get("conflict_validation_required"):
+            with ctx.phase("validation"):
+                ctx.validate(name, ctx.base / name, source, plan, head)
 
     def execute(self, plans: dict[str, dict]) -> dict:
         ctx = self.context
@@ -240,6 +251,10 @@ class Runner:
                     result = self.execute_one(name, plan, rows[name], progress)
                 except ERRORS as exc:
                     result = {"state": "FAILED", "error": str(exc)[-2000:]}
+                    if isinstance(exc, conflicts.ConflictResolutionRequired):
+                        result.update(error_code="CONFLICT_RESOLUTION_REQUIRED", conflict_recovery=exc.recovery)
+                    elif isinstance(exc, shared.RevalidationRequired):
+                        result["error_code"] = "REVALIDATION_REQUIRED"
                 try:
                     rotation = ctx.identity(name).get("rotation", {})
                     result["rotation_phase"] = rotation.get("phase")

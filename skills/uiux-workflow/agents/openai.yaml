@@ -1,7 +1,0 @@
-interface:
-  display_name: "UIUX Workflow"
-  short_description: "Build and review UI/UX with project guidelines."
-  default_prompt: "Use $stageflow:uiux-workflow to implement and review this UI/UX change."
-
-policy:
-  allow_implicit_invocation: false

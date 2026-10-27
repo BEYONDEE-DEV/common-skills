@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit inactive Stageflow generation branches without changing Git or the manifest."""
+"""Audit inactive generation branches without changing Git or the manifest."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def checked_out_branches(repo: Path) -> dict[str, list[str]]:
 
 
 def local_family_refs(repo: Path, family: str) -> list[tuple[str, str]]:
-    pattern = re.compile(rf"^{re.escape(family)}(?:-stageflow-g[0-9]+)?$")
+    pattern = re.compile(rf"^{re.escape(family)}(?:-mrw-g[0-9]+)?$")
     output = git(
         repo,
         "for-each-ref",

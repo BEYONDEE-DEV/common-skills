@@ -35,7 +35,7 @@ python3 "<skill-dir>/scripts/promote_bundle.py" --root "<workspace-root>" \
 
 Use repeated `--repository "<manifest-repository-name>"` to select a subset. Without a subset, all manifest repositories in the bundle are considered independently. Resolve scope from the user's request; ask only when the repository selection or permanent source context is genuinely ambiguous.
 
-Preparation fetches the exact source/environment refs without checking out branches, writing task files, or changing local source branches. It writes a fingerprinted plan under `.stageflow-worktrees/promotions/`. The result includes `plan_path` and per-repository `route`, original `refs`, and `steps` containing input/target/result SHA, action, commit subjects and changed paths.
+Preparation fetches the exact source/environment refs without checking out branches, writing task files, or changing local source branches. It writes a fingerprinted plan under `.multi-repo-worktree/promotions/`. The result includes `plan_path` and per-repository `route`, original `refs`, and `steps` containing input/target/result SHA, action, commit subjects and changed paths.
 
 Read the generated plan and send a concise summary of the repositories, source-to-prod paths, included changes, any blocked repositories and partial-success behavior. A `promote` request authorizes these normal updates; do not turn the summary into another routine approval gate. Missing branches or divergent histories block only that repository, before its first remote update. Never auto-create a production/environment branch or silently switch to a merge commit, force push or admin bypass.
 

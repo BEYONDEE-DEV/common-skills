@@ -1,7 +1,7 @@
 interface:
   display_name: "Multi Repo Worktree"
   short_description: "Permanent worktrees, ready PRs and branch promotion."
-  default_prompt: "Use $stageflow:multi-repo-worktree submit to publish ready PRs while preserving local follow-up work."
+  default_prompt: "Use $common-skills:multi-repo-worktree submit to publish ready PRs while preserving local follow-up work."
 
 policy:
   allow_implicit_invocation: false
