@@ -2,8 +2,9 @@
 """Status, submit and promote for a folder of independent Git repositories.
 
 Every command prints one JSON document on stdout. Per-repository outcomes are
-reported in ``repositories[].status``; one repository failing never stops the
-others. The script never force-pushes, resets, rebases or merges PRs.
+reported in ``repositories[].status``; repositories run concurrently and one
+failing never stops the others. The script never force-pushes, resets,
+rebases or merges PRs.
 """
 from __future__ import annotations
 
@@ -14,13 +15,16 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REMOTE = "origin"
 SOURCE_CONFIG = "multiRepoSource"  # git config branch.<name>.multiRepoSource
 DEFAULT_CHAIN = ("dev", "dev2", "prod")
 PROTECTED = {"main", "master", *DEFAULT_CHAIN}
+MAX_WORKERS = 8
+DIFF_LIMIT = 12000  # characters of working-tree diff returned by submit --prepare
 
 ENV = {
     **os.environ,
@@ -38,10 +42,10 @@ class Failure(Exception):
         self.extra = extra
 
 
-def run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], cwd: Path, check: bool = True, input: str | None = None) -> subprocess.CompletedProcess[str]:
     try:
         proc = subprocess.run(
-            args, cwd=cwd, env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            args, cwd=cwd, env=ENV, input=input, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
     except FileNotFoundError as error:
         raise Failure("COMMAND_MISSING", f"{args[0]} is not installed") from error
@@ -51,8 +55,8 @@ def run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedP
     return proc
 
 
-def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(["git", "-c", "core.quotePath=false", *args], repo, check)
+def git(repo: Path, *args: str, check: bool = True, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-c", "core.quotePath=false", *args], repo, check, input)
 
 
 def out(repo: Path, *args: str) -> str:
@@ -106,8 +110,19 @@ def is_ancestor(repo: Path, older: str, newer: str) -> bool:
 
 
 def dirty_paths(repo: Path) -> list[str]:
-    lines = git(repo, "status", "--porcelain", "--untracked-files=all").stdout.splitlines()
-    return [line[3:] for line in lines if line.strip()]
+    """Paths with uncommitted or untracked changes; renames list both sides."""
+    fields = git(repo, "status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0")
+    paths, index = [], 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        paths.append(entry[3:])
+        if entry[0] in "RC":
+            paths.append(fields[index])
+            index += 1
+    return paths
 
 
 def merging(repo: Path) -> bool:
@@ -123,8 +138,24 @@ def ahead_behind(repo: Path, base: str, head: str = "HEAD") -> tuple[int, int]:
     return int(ahead), int(behind)
 
 
-def fetch(repo: Path) -> None:
-    git(repo, "fetch", "--prune", "--no-tags", REMOTE)
+def remote_heads(repo: Path, *branches: str) -> list[str]:
+    refs = [f"refs/heads/{b}" for b in branches]
+    lines = out(repo, "ls-remote", "--heads", REMOTE, *refs).splitlines()
+    return [line.split("refs/heads/", 1)[1] for line in lines if "refs/heads/" in line]
+
+
+def fetch_branches(repo: Path, *branches: str) -> set[str]:
+    """Fetch only these branches; forget remote-tracking refs of branches deleted on the remote."""
+    wanted = list(dict.fromkeys(b for b in branches if b))
+    refspecs = [f"+refs/heads/{b}:refs/remotes/{REMOTE}/{b}" for b in wanted]
+    if git(repo, "fetch", "--no-tags", REMOTE, *refspecs, check=False).returncode == 0:
+        return set(wanted)
+    present = set(remote_heads(repo, *wanted))
+    for branch in set(wanted) - present:
+        git(repo, "update-ref", "-d", f"refs/remotes/{REMOTE}/{branch}", check=False)
+    if present:
+        git(repo, "fetch", "--no-tags", REMOTE, *[s for b, s in zip(wanted, refspecs) if b in present])
+    return present
 
 
 # --- GitHub -----------------------------------------------------------------
@@ -158,19 +189,53 @@ def resolve_source(repo: Path, branch: str, explicit: str | None, pr: dict[str, 
     return None, None
 
 
+def pr_material(repo: Path, source: str, prs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Commits and diff a new PR from HEAD into the source would contain."""
+    merged = [pr for pr in prs if pr.get("state") == "MERGED" and pr.get("headRefOid")]
+    boundary = max(merged, key=lambda pr: pr["number"])["headRefOid"] if merged else None
+    # Squash merges leave the old task commits off the source; skip everything the last merged PR carried.
+    exclude = [f"^{boundary}"] if boundary and is_ancestor(repo, boundary, "HEAD") else []
+    commits = out(repo, "log", "--no-merges", "--format=%s", "HEAD", f"^{REMOTE}/{source}", *exclude)
+    return {"commits": commits.splitlines(), "diffstat": out(repo, "diff", "--stat", f"{REMOTE}/{source}...HEAD")}
+
+
+# --- shared submit context ----------------------------------------------------
+
+
+def submit_context(repo: Path, source_arg: str | None) -> dict[str, Any]:
+    """Resolve branch, PR and source, fetch them, and refuse unsafe branches."""
+    branch = current_branch(repo)
+    if not branch:
+        raise Failure("DETACHED", "HEAD is detached; check out the task branch first")
+    if branch in PROTECTED:
+        raise Failure("PROTECTED_BRANCH", f"refusing to submit from {branch}; use a task branch", branch=branch)
+    prs = list_prs(repo, branch)
+    pr = choose_pr(prs)
+    source, origin = resolve_source(repo, branch, source_arg, pr)
+    if not source:
+        raise Failure("SOURCE_REQUIRED", "source branch is unknown; ask the user and pass --source",
+                      branch=branch, remote_branches=sorted(remote_heads(repo)))
+    if branch == source:
+        raise Failure("PROTECTED_BRANCH", f"refusing to submit from {branch}; use a task branch", branch=branch)
+    if source not in fetch_branches(repo, branch, source):
+        raise Failure("SOURCE_NOT_FOUND", f"{REMOTE}/{source} does not exist", source=source)
+    git(repo, "config", f"branch.{branch}.{SOURCE_CONFIG}", source)
+    open_pr = pr if pr and pr["state"] == "OPEN" else None
+    return {"branch": branch, "source": source, "source_from": origin, "prs": prs, "open_pr": open_pr}
+
+
+def public(ctx: dict[str, Any]) -> dict[str, Any]:
+    return {key: ctx[key] for key in ("branch", "source", "source_from")}
+
+
 # --- status -----------------------------------------------------------------
 
 
 def status_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": "OK"}
-    if not args.offline:
-        fetch(repo)
     branch = current_branch(repo)
-    result["branch"] = branch
-    result["dirty"] = dirty_paths(repo)
-    result["merging"] = merging(repo)
+    result: dict[str, Any] = {"status": "OK" if branch else "DETACHED", "branch": branch,
+                              "dirty": dirty_paths(repo), "merging": merging(repo)}
     if not branch:
-        result["status"] = "DETACHED"
         return result
     pr = None
     try:
@@ -180,6 +245,8 @@ def status_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
     result["pr"] = pr
     source, origin = resolve_source(repo, branch, args.source, pr)
     result["source"], result["source_from"] = source, origin
+    if not args.offline:
+        fetch_branches(repo, branch, source or "")
     if source and remote_sha(repo, source):
         result["ahead"], result["behind"] = ahead_behind(repo, f"{REMOTE}/{source}")
     pushed = remote_sha(repo, branch)
@@ -188,6 +255,29 @@ def status_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
 
 
 # --- submit -----------------------------------------------------------------
+
+
+def prepare_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
+    """Everything the agent needs to write one plan entry, without changing the branch."""
+    ctx = submit_context(repo, args.source)
+    result: dict[str, Any] = {**public(ctx), "status": "READY", "pr": ctx["open_pr"]}
+    if merging(repo) and conflict_paths(repo):
+        return {**result, "status": "CONFLICT", "conflicts": conflict_paths(repo)}
+    dirty = dirty_paths(repo)
+    result["dirty"] = dirty
+    if dirty:
+        untracked = set(out(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0")) - {""}
+        diff = git(repo, "diff", "HEAD", "--no-color", "--no-ext-diff").stdout
+        result.update(
+            untracked=sorted(untracked),
+            dirty_diffstat=out(repo, "diff", "HEAD", "--stat"),
+            dirty_diff=diff[:DIFF_LIMIT],
+            dirty_diff_truncated=len(diff) > DIFF_LIMIT,
+        )
+    result["needs_pr_text"] = ctx["open_pr"] is None
+    if result["needs_pr_text"]:
+        result.update(pr_material(repo, ctx["source"], ctx["prs"]))
+    return result
 
 
 def merge_into_head(repo: Path, target: str) -> dict[str, Any] | None:
@@ -203,54 +293,49 @@ def merge_into_head(repo: Path, target: str) -> dict[str, Any] | None:
     raise Failure("MERGE_FAILED", (proc.stderr or proc.stdout).strip())
 
 
-def pr_material(repo: Path, source: str, prs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Commits and diff a new PR will contain. HEAD already includes the source."""
-    merged = [pr for pr in prs if pr.get("state") == "MERGED" and pr.get("headRefOid")]
-    boundary = max(merged, key=lambda pr: pr["number"])["headRefOid"] if merged else None
-    # Squash merges leave the old task commits off the source; skip everything the last merged PR carried.
-    exclude = [f"^{boundary}"] if boundary and is_ancestor(repo, boundary, "HEAD") else []
-    commits = out(repo, "log", "--no-merges", "--format=%s", "HEAD", f"^{REMOTE}/{source}", *exclude)
-    return {"commits": commits.splitlines(), "diffstat": out(repo, "diff", "--stat", f"{REMOTE}/{source}", "HEAD")}
+def commit_entry(repo: Path, commit: dict[str, Any]) -> bool:
+    """Stage exactly the planned paths and commit them; a rerun with nothing left is a no-op."""
+    paths, message = commit.get("paths") or [], (commit.get("message") or "").strip()
+    if not paths:
+        return False
+    if not message:
+        raise Failure("PLAN_INVALID", "commit.message is required when commit.paths is set")
+    # Paths already gone from both disk and index (e.g. a staged `git mv` source) need no add.
+    known = set(out(repo, "ls-files", "-z", "--", *paths).split("\0"))
+    present = [p for p in paths if p in known or (repo / p).exists()]
+    if present:
+        git(repo, "add", "-A", "--", *present)
+    if git(repo, "diff", "--quiet", "HEAD", "--", *paths, check=False).returncode == 0:
+        return False
+    # Commit only the planned paths, even if something else was staged beforehand.
+    git(repo, "commit", "-F", "-", "--", *paths, input=message + "\n")
+    return True
 
 
-def submit_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
-    branch = current_branch(repo)
-    if not branch:
-        raise Failure("DETACHED", "HEAD is detached; check out the task branch first")
-    if branch in PROTECTED:
-        raise Failure("PROTECTED_BRANCH", f"refusing to submit from {branch}; use a task branch", branch=branch)
-    fetch(repo)
-    prs = list_prs(repo, branch)
-    pr = choose_pr(prs)
-    source, origin = resolve_source(repo, branch, args.source, pr)
-    if not source:
-        remotes = [line.split("/", 1)[1] for line in out(repo, "branch", "-r", "--format=%(refname:short)").splitlines()
-                   if line.startswith(f"{REMOTE}/") and line != f"{REMOTE}/HEAD"]
-        raise Failure("SOURCE_REQUIRED", "source branch is unknown; ask the user and pass --source",
-                      branch=branch, remote_branches=remotes)
-    if branch == source:
-        raise Failure("PROTECTED_BRANCH", f"refusing to submit from {branch}; use a task branch", branch=branch)
-    if not remote_sha(repo, source):
-        raise Failure("SOURCE_NOT_FOUND", f"{REMOTE}/{source} does not exist", source=source)
-    git(repo, "config", f"branch.{branch}.{SOURCE_CONFIG}", source)
-    base = {"branch": branch, "source": source, "source_from": origin}
+def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    entry = entry or {}
+    ctx = submit_context(repo, args.source)
+    base = public(ctx)
 
     if merging(repo):
         conflicts = conflict_paths(repo)
         if conflicts:
             return {**base, "status": "CONFLICT", "conflicts": conflicts}
         git(repo, "commit", "--no-edit")
+    if entry.get("commit"):
+        base["committed"] = commit_entry(repo, entry["commit"])
     dirty = dirty_paths(repo)
     if dirty:
         return {**base, "status": "DIRTY", "dirty": dirty}
 
+    branch, source = ctx["branch"], ctx["source"]
     targets = [f"{REMOTE}/{branch}"] if remote_sha(repo, branch) else []
     for target in [*targets, f"{REMOTE}/{source}"]:
         conflict = merge_into_head(repo, target)
         if conflict:
             return {**base, **conflict}
 
-    open_pr = pr if pr and pr["state"] == "OPEN" else None
+    open_pr = ctx["open_pr"]
     if git(repo, "diff", "--quiet", f"{REMOTE}/{source}", "HEAD", check=False).returncode == 0:
         return {**base, "status": "NO_CHANGES", "pr": open_pr}
 
@@ -267,20 +352,30 @@ def submit_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
         if open_pr["baseRefName"] != source:
             base["warning"] = f"open PR targets {open_pr['baseRefName']}, not {source}"
         return {**base, "status": "UPDATED", "pr": open_pr}
-    if not args.title:
-        return {**base, "status": "PR_TEXT_REQUIRED", **pr_material(repo, source, prs)}
-    create = ["gh", "pr", "create", "--base", source, "--head", branch, "--title", args.title]
-    create += ["--body-file", str(args.body_file)] if args.body_file else ["--body", ""]
-    url = run(create, repo).stdout.strip().splitlines()[-1]
-    return {**base, "status": "CREATED", "pr": {"url": url, "title": args.title, "baseRefName": source}}
+    pr_text = entry.get("pr") or {}
+    title = args.title or pr_text.get("title")
+    if not title:
+        return {**base, "status": "PR_TEXT_REQUIRED", **pr_material(repo, source, ctx["prs"])}
+    body = args.body_file.read_text(encoding="utf-8") if args.body_file else pr_text.get("body", "")
+    create = ["gh", "pr", "create", "--base", source, "--head", branch, "--title", title, "--body-file", "-"]
+    url = run(create, repo, input=body).stdout.strip().splitlines()[-1]
+    return {**base, "status": "CREATED", "pr": {"url": url, "title": title, "baseRefName": source}}
+
+
+def load_plan(path: Path) -> dict[str, dict[str, Any]]:
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))["repositories"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise Failure("PLAN_INVALID", f"cannot read plan {path}: {error}") from error
+    if not isinstance(plan, dict):
+        raise Failure("PLAN_INVALID", "plan.repositories must map repository names to entries")
+    return plan
 
 
 # --- promote ----------------------------------------------------------------
 
 
 def promote_plan(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
-    if not args.offline:
-        fetch(repo)
     start = args.start
     if not start:
         branch = current_branch(repo)
@@ -289,6 +384,10 @@ def promote_plan(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
             raise Failure("SOURCE_REQUIRED", "promotion start branch is unknown; pass --from")
     chain = list(args.chain)
     stages = chain[chain.index(start):] if start in chain else [start, *chain]
+    if not args.offline:
+        missing = set(stages) - fetch_branches(repo, *stages)
+        if missing:
+            raise Failure("BRANCH_NOT_FOUND", f"{REMOTE} has no {', '.join(sorted(missing))}")
     current = remote_sha(repo, stages[0])
     if not current:
         raise Failure("BRANCH_NOT_FOUND", f"{REMOTE}/{stages[0]} does not exist")
@@ -337,15 +436,18 @@ def promote_execute(repo: Path, plan: dict[str, Any]) -> dict[str, Any]:
 # --- entry point --------------------------------------------------------------
 
 
-def each(repos: list[Path], action) -> list[dict[str, Any]]:
-    results = []
-    for repo in repos:
+def each(repos: list[Path], action: Callable[[Path], dict[str, Any]]) -> list[dict[str, Any]]:
+    def one(repo: Path) -> dict[str, Any]:
         try:
             result = action(repo)
         except Failure as error:
             result = {"status": error.status, "error": str(error), **error.extra}
-        results.append({"repo": repo.name, "path": str(repo), **result})
-    return results
+        return {"repo": repo.name, "path": str(repo), **result}
+
+    if not repos:
+        return []
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(repos))) as pool:
+        return list(pool.map(one, repos))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -360,7 +462,10 @@ def main(argv: list[str] | None = None) -> int:
 
     submit = commands.add_parser("submit")
     submit.add_argument("--source", help="source branch to merge from and open the PR against")
-    submit.add_argument("--title", help="PR title, used only when a new PR is created")
+    mode = submit.add_mutually_exclusive_group()
+    mode.add_argument("--prepare", action="store_true", help="report what each repository needs; change nothing")
+    mode.add_argument("--plan", type=Path, help="JSON plan with per-repository commit and PR text")
+    submit.add_argument("--title", help="PR title for a single --repo, used only when a new PR is created")
     submit.add_argument("--body-file", type=Path)
 
     promote = commands.add_parser("promote")
@@ -373,27 +478,41 @@ def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
     try:
-        repos = discover(args.root, args.repo)
-        if args.command == "submit" and args.title and len(repos) != 1:
-            raise Failure("USAGE", "--title applies to exactly one --repo")
-        if args.command == "status":
-            report = {"repositories": each(repos, lambda r: status_one(r, args))}
-        elif args.command == "submit":
-            report = {"repositories": each(repos, lambda r: submit_one(r, args))}
-        else:
-            plans = each(repos, lambda r: promote_plan(r, args))
-            report = {"plan_id": plan_id(plans), "repositories": plans}
-            if args.execute:
-                if args.execute != report["plan_id"]:
-                    raise Failure("PLAN_CHANGED", "remote branches changed since the plan was shown; review again",
-                                  plan_id=report["plan_id"])
-                by_path = {p["path"]: p for p in plans}
-                report["repositories"] = each(repos, lambda r: promote_execute(r, by_path[str(r)]))
+        report = dispatch(args)
     except Failure as error:
         print(json.dumps({"status": error.status, "error": str(error), **error.extra}, ensure_ascii=False, indent=2))
         return 2
     print(json.dumps({"command": args.command, **report}, ensure_ascii=False, indent=2))
     return 0
+
+
+def dispatch(args: argparse.Namespace) -> dict[str, Any]:
+    repos = discover(args.root, args.repo)
+    if args.command == "status":
+        return {"repositories": each(repos, lambda r: status_one(r, args))}
+    if args.command == "submit":
+        if (args.title or args.body_file) and (len(repos) != 1 or args.plan or args.prepare):
+            raise Failure("USAGE", "--title/--body-file apply to exactly one --repo without --plan/--prepare")
+        if args.prepare:
+            return {"repositories": each(repos, lambda r: prepare_one(r, args))}
+        if args.plan:
+            plan = load_plan(args.plan)
+            unknown = set(plan) - {r.name for r in repos}
+            if unknown:
+                raise Failure("UNKNOWN_REPOSITORY", f"plan names unknown repositories: {', '.join(sorted(unknown))}")
+            planned = [r for r in repos if r.name in plan]
+            return {"repositories": each(planned, lambda r: submit_one(r, args, plan[r.name] or {}))}
+        return {"repositories": each(repos, lambda r: submit_one(r, args))}
+
+    plans = each(repos, lambda r: promote_plan(r, args))
+    report: dict[str, Any] = {"plan_id": plan_id(plans), "repositories": plans}
+    if args.execute:
+        if args.execute != report["plan_id"]:
+            raise Failure("PLAN_CHANGED", "remote branches changed since the plan was shown; review again",
+                          plan_id=report["plan_id"])
+        by_path = {p["path"]: p for p in plans}
+        report["repositories"] = each(repos, lambda r: promote_execute(r, by_path[str(r)]))
+    return report
 
 
 if __name__ == "__main__":

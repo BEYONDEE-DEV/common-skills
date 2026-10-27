@@ -16,10 +16,12 @@ SCRIPT = SKILL_DIR / "scripts" / "multi_repo.py"
 FAKE_GH = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    import json, os, sys
+    import fcntl, json, os, sys
     from pathlib import Path
 
     state = Path(os.environ["FAKE_GH_STATE"])
+    lock = open(str(state) + ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)  # the runner calls gh for several repositories concurrently
     prs = json.loads(state.read_text(encoding="utf-8")) if state.exists() else []
     args = sys.argv[1:]
 
@@ -31,7 +33,8 @@ FAKE_GH = textwrap.dedent(
         print(json.dumps([p for p in prs if p["headRefName"] == head]))
     elif args[:2] == ["pr", "create"]:
         number = len(prs) + 1
-        body = Path(opt("--body-file")).read_text(encoding="utf-8") if opt("--body-file") else opt("--body")
+        source = opt("--body-file")
+        body = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8") if source else opt("--body")
         prs.append({"number": number, "state": "OPEN", "url": f"https://github.com/o/r/pull/{number}",
                     "baseRefName": opt("--base"), "headRefName": opt("--head"), "title": opt("--title"),
                     "body": body, "headRefOid": None})
@@ -214,6 +217,87 @@ class SubmitTests(MultiRepoTestCase):
         (self.ws.api / "dirty.txt").write_text("x", encoding="utf-8")
         results = {r["repo"]: r["status"] for r in self.ws.run("submit", "--source", "dev")["repositories"]}
         self.assertEqual(results, {"api": "DIRTY", "web": "PR_TEXT_REQUIRED"})
+
+
+class PlannedSubmitTests(MultiRepoTestCase):
+    def write_plan(self, entries: dict) -> str:
+        path = self.ws.bundle.parent / "plan.json"
+        path.write_text(json.dumps({"repositories": entries}, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def test_prepare_reports_work_without_changing_anything(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A 작업")
+        (self.ws.api / "base.txt").write_text("changed\n", encoding="utf-8")
+        (self.ws.api / "new.txt").write_text("n\n", encoding="utf-8")
+        head = git(self.ws.api, "rev-parse", "HEAD")
+
+        result = self.ws.repo_result("submit", "--source", "dev", "--prepare")
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(sorted(result["dirty"]), ["base.txt", "new.txt"])
+        self.assertEqual(result["untracked"], ["new.txt"])
+        self.assertIn("+changed", result["dirty_diff"])
+        self.assertTrue(result["needs_pr_text"])
+        self.assertEqual(result["commits"], ["A 작업"])
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD"), head)
+        self.assertNotIn("feature", git(self.ws.remote, "branch"))
+
+    def test_plan_commits_and_opens_prs_for_every_repository_in_one_call(self) -> None:
+        web = self.ws.clone("web", "feature-web")
+        (self.ws.api / "a.txt").write_text("a\n", encoding="utf-8")
+        (web / "w.txt").write_text("w\n", encoding="utf-8")
+        plan = self.write_plan({
+            "api": {"commit": {"message": "A 기능 추가\n\n상세 설명", "paths": ["a.txt"]},
+                    "pr": {"title": "A 기능", "body": "본문 A"}},
+            "web": {"commit": {"message": "W 기능 추가", "paths": ["w.txt"]},
+                    "pr": {"title": "W 기능", "body": "본문 W"}},
+        })
+        results = {r["repo"]: r for r in self.ws.run("submit", "--source", "dev", "--plan", plan)["repositories"]}
+        self.assertEqual({k: v["status"] for k, v in results.items()}, {"api": "CREATED", "web": "CREATED"})
+        self.assertEqual(git(self.ws.remote, "log", "-1", "--format=%B", "feature").strip(), "A 기능 추가\n\n상세 설명")
+        self.assertEqual({(p["headRefName"], p["title"], p["body"]) for p in self.ws.prs()},
+                         {("feature", "A 기능", "본문 A"), ("feature-web", "W 기능", "본문 W")})
+
+        rerun = {r["repo"]: r for r in self.ws.run("submit", "--plan", plan)["repositories"]}
+        self.assertEqual({k: (v["status"], v["committed"]) for k, v in rerun.items()},
+                         {"api": ("UPDATED", False), "web": ("UPDATED", False)})
+        self.assertEqual(len(self.ws.prs()), 2, "rerunning a plan never duplicates PRs")
+
+    def test_plan_only_touches_listed_repositories_and_paths(self) -> None:
+        web = self.ws.clone("web", "feature-web")
+        (web / "w.txt").write_text("w\n", encoding="utf-8")
+        (self.ws.api / "a.txt").write_text("a\n", encoding="utf-8")
+        (self.ws.api / "unrelated.txt").write_text("u\n", encoding="utf-8")
+        plan = self.write_plan({"api": {"commit": {"message": "A", "paths": ["a.txt"]}, "pr": {"title": "A"}}})
+        results = self.ws.run("submit", "--source", "dev", "--plan", plan)["repositories"]
+        self.assertEqual([(r["repo"], r["status"], r["dirty"]) for r in results], [("api", "DIRTY", ["unrelated.txt"])])
+        self.assertTrue(results[0]["committed"])
+        self.assertEqual((web / "w.txt").exists() and git(web, "status", "--porcelain"), "?? w.txt")
+
+    def test_plan_commits_renames_and_deletions(self) -> None:
+        git(self.ws.api, "mv", "base.txt", "moved.txt")
+        plan = self.write_plan({"api": {"commit": {"message": "이동", "paths": ["base.txt", "moved.txt"]},
+                                        "pr": {"title": "이동"}}})
+        self.assertEqual(self.ws.repo_result("submit", "--source", "dev", "--plan", plan)["status"], "CREATED")
+        self.assertEqual(git(self.ws.remote, "ls-tree", "--name-only", "feature"), "moved.txt")
+
+    def test_plan_naming_unknown_repository_is_rejected(self) -> None:
+        plan = self.write_plan({"nope": {}})
+        self.assertEqual(self.ws.run("submit", "--plan", plan)["status"], "UNKNOWN_REPOSITORY")
+
+    def test_branch_deleted_on_merge_is_pushed_again(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        merged_head = self.ws.remote_sha("feature")
+        self.ws.advance("dev", "a.txt", "a\n", "A (#1)")
+        git(self.ws.remote, "branch", "-D", "feature")
+        prs = self.ws.prs()
+        prs[0].update(state="MERGED", headRefOid=merged_head)
+        self.ws.gh_state.write_text(json.dumps(prs), encoding="utf-8")
+
+        self.ws.commit(self.ws.api, "b.txt", "b\n", "B")
+        result = self.ws.repo_result("submit", "--title", "B")
+        self.assertEqual(result["status"], "CREATED")
+        self.assertEqual(self.ws.remote_sha("feature"), git(self.ws.api, "rev-parse", "HEAD"))
 
 
 class StatusTests(MultiRepoTestCase):

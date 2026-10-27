@@ -30,24 +30,40 @@ python3 "<skill-dir>/scripts/multi_repo.py" --root "<bundle>" [--repo <name> ...
 
 ## submit
 
-Goal: every selected repository ends with its task branch pushed, containing the latest source branch, and an open PR into that source.
+Goal: every selected repository ends with its task branch pushed, containing the latest source branch, and an open PR into that source. Use exactly two runner calls in the normal case; do not run per-repository `git status`/`git diff` yourself.
 
-1. Commit first. For each repository with changes (`git status`), commit only task-related paths, with a Korean message that follows the repository's existing commit conventions. Leave a repository uncommitted and ask the user only if its changes look unrelated, secret, or generated.
-2. Run `submit`. It fetches, merges `origin/<branch>` and then `origin/<source>` into the task branch (normal merge commits; never rebase), pushes without force, and finds the PR for the branch.
-3. Act on each repository's status, then rerun `submit` for that repository until it reaches `CREATED`, `UPDATED` or `NO_CHANGES`:
+1. **Prepare** (changes nothing): `submit --prepare [--source <branch>]`. All repositories are fetched concurrently. Each `READY` repository reports `dirty` paths with `dirty_diffstat`, `dirty_diff` (cut at 12,000 characters when `dirty_diff_truncated`; read files directly only if you need more), `untracked`, the open `pr`, and, when `needs_pr_text`, the `commits` and `diffstat` a new PR would contain (plus the dirty changes once committed).
+2. **Write one plan file** outside every repository (for example in the system temp directory; a file inside a repository would make it dirty), covering every repository to submit (omit repositories to leave alone):
+
+```json
+{"repositories": {
+  "api": {"commit": {"message": "로그인 오류 메시지 개선", "paths": ["src/login.ts", "src/old.ts"]},
+          "pr": {"title": "로그인 오류 메시지 개선", "body": "## 변경 사항\n- ..."}},
+  "web": {}
+}}
+```
+
+   - `commit`: only when the repository is dirty. List exactly the task-related paths (for renames, both sides); only those are committed, whatever else is staged. Write the message in Korean following the repository's existing commit conventions. If changes look unrelated, secret, or generated, leave them out and ask the user.
+   - `pr`: only when `needs_pr_text`. Korean title and body from `commits`, `diffstat` and the committed changes; follow the repository's PR template if any.
+   - An empty entry (`{}`) just merges the source, pushes, and updates the existing PR.
+3. **Execute**: `submit --plan <file> [--source <branch>]`. For each planned repository, concurrently: commit the planned paths, merge `origin/<branch>` and then `origin/<source>` (normal merge commits; never rebase), push without force, and create or update the PR.
+4. Act on any repository not at `CREATED`, `UPDATED` or `NO_CHANGES`, then rerun `--repo <name> submit --plan <file>` for it. Rerunning a plan is safe: already committed paths and existing PRs are not duplicated.
+
+Without `--prepare`/`--plan`, `submit` runs step 3 with no commits for every repository; `--repo <name> submit --title "<title>" --body-file <file>` creates a single PR directly.
 
 | status | meaning | next step |
 |---|---|---|
 | `SOURCE_REQUIRED` | No `--source`, remembered source, or PR base. | Ask the user which branch to merge from (`remote_branches` lists candidates); rerun with `--source <branch>`. It is remembered afterwards in `git config branch.<branch>.multiRepoSource`. |
-| `DIRTY` | Uncommitted or untracked files remain (`dirty`). | Commit them as in step 1, or ask the user. Ignored files never count. |
-| `CONFLICT` | A merge stopped (`merging`, `conflicts`). | Resolve every listed file preserving both sides' intent (never take a whole side blindly, never drop tests), `git add` them, rerun `submit`; it completes the merge commit. Ask the user only when the intents genuinely contradict. |
-| `PR_TEXT_REQUIRED` | Pushed; no open PR yet. | Write a Korean PR title and body from `commits` and `diffstat` (follow the repository's PR template if any), save the body to a file, rerun with `--repo <name> --title "<title>" --body-file <file>`. |
+| `READY` | (`--prepare` only) Ready for a plan entry. | Write its entry as in step 2. |
+| `DIRTY` | Files outside the plan's `commit.paths` remain (`dirty`); nothing was merged or pushed. | Add them to the plan if they belong to the task, otherwise ask the user. Ignored files never count. |
+| `CONFLICT` | A merge stopped (`merging`, `conflicts`). | Resolve every listed file preserving both sides' intent (never take a whole side blindly, never drop tests), `git add` them, rerun step 4; it completes the merge commit. Ask the user only when the intents genuinely contradict. |
+| `PR_TEXT_REQUIRED` | Pushed; no open PR and the plan had no `pr` text. | Add `pr` to its plan entry from `commits` and `diffstat`, rerun step 4. |
 | `CREATED` / `UPDATED` | PR opened / existing open PR updated by the push. | Done. Report `pr.url`; mention any `warning`. |
 | `NO_CHANGES` | Branch has no difference from the source (e.g. its PR was already squash-merged). | Done; nothing pushed. |
 | `PROTECTED_BRANCH` | Current branch is `main`, `master`, `dev`, `dev2`, `prod`, or equals the source. | Stop for this repository; tell the user to switch to a task branch. |
-| `PUSH_REJECTED` / `MERGE_FAILED` / `COMMAND_FAILED` / `DETACHED` / `GH_MISSING` / `SOURCE_NOT_FOUND` | Environment or remote problem (`error`). | Report the error; rerun once if the remote simply moved. If a commit hook rejected the merge commit (merge still in progress, no conflicts), commit it with `git commit -m "<message the hook accepts>"` and rerun. Never force-push. |
+| `PUSH_REJECTED` / `MERGE_FAILED` / `COMMAND_FAILED` / `DETACHED` / `GH_MISSING` / `SOURCE_NOT_FOUND` / `PLAN_INVALID` / `UNKNOWN_REPOSITORY` | Environment or remote problem (`error`). | Report the error; rerun once if the remote simply moved. If a commit hook rejected the merge commit (merge still in progress, no conflicts), commit it with `git commit -m "<message the hook accepts>"` and rerun. Never force-push. |
 
-After a PR is squash-merged on GitHub, keep working on the same branch and run `submit` again: the merge brings in the squashed source, so the next PR shows only new work.
+After a PR is squash-merged on GitHub, keep working on the same branch and submit again: the merge brings in the squashed source, so the next PR shows only new work.
 
 The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches.
 
