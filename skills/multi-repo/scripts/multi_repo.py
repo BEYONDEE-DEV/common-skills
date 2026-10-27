@@ -280,6 +280,17 @@ def prepare_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def contained_in(repo: Path, commit: str, source: str) -> bool:
+    """True when ``commit`` adds nothing to ``source``: merging it would leave the source tree unchanged.
+
+    This is how squash-merged work is recognised, since its commits never become ancestors of the source.
+    """
+    if is_ancestor(repo, commit, source):
+        return True
+    proc = git(repo, "merge-tree", "--write-tree", source, commit, check=False)
+    return proc.returncode == 0 and proc.stdout.split()[0] == out(repo, "rev-parse", f"{source}^{{tree}}")
+
+
 def merge_into_head(repo: Path, target: str) -> dict[str, Any] | None:
     """Merge ``target`` into HEAD. Returns a CONFLICT outcome or None on success."""
     if is_ancestor(repo, target, "HEAD"):
@@ -329,20 +340,40 @@ def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | Non
         return {**base, "status": "DIRTY", "dirty": dirty}
 
     branch, source = ctx["branch"], ctx["source"]
-    targets = [f"{REMOTE}/{branch}"] if remote_sha(repo, branch) else []
-    for target in [*targets, f"{REMOTE}/{source}"]:
-        conflict = merge_into_head(repo, target)
+    source_ref, source_sha = f"{REMOTE}/{source}", remote_sha(repo, source)
+    # A remote task branch whose work is already in the source (its PR was squash-merged) is stale:
+    # never merge it back, and replace it on push instead of stacking new work on top of it.
+    remote_head = remote_sha(repo, branch)
+    stale_remote = bool(remote_head) and contained_in(repo, remote_head, source_ref)
+    if remote_head and not stale_remote:
+        conflict = merge_into_head(repo, f"{REMOTE}/{branch}")
+        if conflict:
+            return {**base, **conflict}
+
+    head = out(repo, "rev-parse", "HEAD")
+    if head != source_sha and contained_in(repo, head, source_ref):
+        # Everything on the branch is already in the source: restart it at the source tip instead of
+        # adding a merge commit. Nothing is lost (the worktree is clean and the source holds all of it);
+        # `switch -C` refuses to overwrite untracked files.
+        git(repo, "switch", "-q", "-C", branch, source_sha)
+        base["moved_to_source"] = head
+    else:
+        conflict = merge_into_head(repo, source_ref)
         if conflict:
             return {**base, **conflict}
 
     open_pr = ctx["open_pr"]
-    if git(repo, "diff", "--quiet", f"{REMOTE}/{source}", "HEAD", check=False).returncode == 0:
+    if git(repo, "diff", "--quiet", source_ref, "HEAD", check=False).returncode == 0:
         return {**base, "status": "NO_CHANGES", "pr": open_pr}
 
     head = out(repo, "rev-parse", "HEAD")
     pushed = False
-    if remote_sha(repo, branch) != head:
-        proc = git(repo, "push", "-u", REMOTE, f"HEAD:refs/heads/{branch}", check=False)
+    if remote_head != head:
+        push = ["push", "-u", REMOTE, f"HEAD:refs/heads/{branch}"]
+        if stale_remote and not is_ancestor(repo, remote_head, head):
+            push.insert(1, f"--force-with-lease=refs/heads/{branch}:{remote_head}")
+            base["replaced_stale_remote"] = remote_head
+        proc = git(repo, *push, check=False)
         if proc.returncode != 0:
             raise Failure("PUSH_REJECTED", (proc.stderr or proc.stdout).strip())
         pushed = True

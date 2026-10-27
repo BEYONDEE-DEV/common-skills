@@ -34,6 +34,7 @@
 - source 브랜치(merge해 올 브랜치이자 PR 대상)는 처음 한 번만 알려 주면 저장소별로 기억합니다(`git config branch.<브랜치>.multiRepoSource`). 열린 PR이 있으면 PR의 base 브랜치를 씁니다.
 - `main`, `master`, `dev`, `dev2`, `prod`에서는 submit하지 않습니다. 작업 브랜치에서 사용하세요.
 - PR merge는 항상 GitHub에서 직접 합니다. force push, reset, rebase, 브랜치 삭제는 하지 않습니다.
+- squash merge된 브랜치는 merge 커밋을 만들지 않고 source 끝으로 다시 시작하며, 머지된 PR의 원격 브랜치는 새 작업으로 교체합니다(해당 SHA일 때만). 동료가 원격 브랜치에 올린 커밋은 교체하지 않고 merge합니다.
 - 커밋되지 않은 파일이 있으면 에이전트가 작업 관련 파일만 커밋하고, 애매하면 물어봅니다. ignore된 파일은 무시합니다.
 
 ### 예시

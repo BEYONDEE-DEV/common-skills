@@ -205,6 +205,56 @@ class SubmitTests(MultiRepoTestCase):
         self.assertIn("b.txt", result["diffstat"])
         self.assertNotIn("a.txt", result["diffstat"])
 
+    def squash_merge_first_pr(self, *later: tuple[str, str, str]) -> str:
+        """Submit A, then squash-merge its PR into dev (plus any later commits). Returns the merged head."""
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A 작업")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        merged_head = self.ws.remote_sha("feature")
+        self.ws.advance("dev", "a.txt", "a\n", "A 기능 (#1)")
+        for name, text, message in later:
+            self.ws.advance("dev", name, text, message)
+        prs = self.ws.prs()
+        prs[0].update(state="MERGED", headRefOid=merged_head)
+        self.ws.gh_state.write_text(json.dumps(prs), encoding="utf-8")
+        return merged_head
+
+    def test_merged_branch_moves_to_source_tip_without_merge_commit(self) -> None:
+        merged_head = self.squash_merge_first_pr(("c.txt", "c\n", "다른 PR (#2)"))
+        result = self.ws.repo_result("submit")
+        self.assertEqual((result["status"], result["moved_to_source"]), ("NO_CHANGES", merged_head))
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD"), self.ws.remote_sha("dev"))
+        self.assertEqual(git(self.ws.api, "status", "--porcelain"), "")
+        self.assertEqual((self.ws.api / "c.txt").read_text(encoding="utf-8"), "c\n")
+        self.assertEqual(git(self.ws.api, "rev-list", "--merges", "--count", "HEAD"), "0")
+
+    def test_existing_merge_commit_on_merged_branch_is_dropped(self) -> None:
+        self.squash_merge_first_pr(("c.txt", "c\n", "다른 PR (#2)"))
+        git(self.ws.api, "fetch", "-q", "origin")
+        git(self.ws.api, "merge", "-q", "--no-edit", "origin/dev")
+        self.assertEqual(self.ws.repo_result("submit")["status"], "NO_CHANGES")
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD"), self.ws.remote_sha("dev"))
+
+    def test_new_work_after_squash_replaces_stale_remote_branch(self) -> None:
+        merged_head = self.squash_merge_first_pr(("c.txt", "c\n", "다른 PR (#2)"))
+        self.ws.repo_result("submit")
+        head = self.ws.commit(self.ws.api, "b.txt", "b\n", "B 작업")
+        result = self.ws.repo_result("submit")
+        self.assertEqual(result["status"], "PR_TEXT_REQUIRED")
+        self.assertEqual(result["replaced_stale_remote"], merged_head)
+        self.assertEqual(result["commits"], ["B 작업"])
+        self.assertEqual(self.ws.remote_sha("feature"), head)
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD^"), self.ws.remote_sha("dev"))
+
+    def test_teammate_commits_on_remote_branch_are_merged_not_replaced(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        teammate = self.ws.advance("feature", "t.txt", "t\n", "동료 작업")
+        self.ws.commit(self.ws.api, "b.txt", "b\n", "B")
+        result = self.ws.repo_result("submit")
+        self.assertEqual(result["status"], "UPDATED")
+        self.assertNotIn("replaced_stale_remote", result)
+        git(self.ws.remote, "merge-base", "--is-ancestor", teammate, "feature")
+
     def test_protected_and_source_branches_are_refused(self) -> None:
         git(self.ws.api, "switch", "-q", "-c", "dev2-copy")
         self.assertEqual(self.ws.repo_result("submit", "--source", "dev2-copy")["status"], "PROTECTED_BRANCH")

@@ -59,13 +59,13 @@ Without `--prepare`/`--plan`, `submit` runs step 3 with no commits for every rep
 | `CONFLICT` | A merge stopped (`merging`, `conflicts`). | Resolve every listed file preserving both sides' intent (never take a whole side blindly, never drop tests), `git add` them, rerun step 4; it completes the merge commit. Ask the user only when the intents genuinely contradict. |
 | `PR_TEXT_REQUIRED` | Pushed; no open PR and the plan had no `pr` text. | Add `pr` to its plan entry from `commits` and `diffstat`, rerun step 4. |
 | `CREATED` / `UPDATED` | PR opened / existing open PR updated by the push. | Done. Report `pr.url`; mention any `warning`. |
-| `NO_CHANGES` | Branch has no difference from the source (e.g. its PR was already squash-merged). | Done; nothing pushed. |
+| `NO_CHANGES` | Branch has no difference from the source (e.g. its PR was already squash-merged). | Done; nothing pushed. `moved_to_source` means the branch only held already-merged work, so it was restarted at the source tip instead of getting a merge commit. |
 | `PROTECTED_BRANCH` | Current branch is `main`, `master`, `dev`, `dev2`, `prod`, or equals the source. | Stop for this repository; tell the user to switch to a task branch. |
 | `PUSH_REJECTED` / `MERGE_FAILED` / `COMMAND_FAILED` / `DETACHED` / `GH_MISSING` / `SOURCE_NOT_FOUND` / `PLAN_INVALID` / `UNKNOWN_REPOSITORY` | Environment or remote problem (`error`). | Report the error; rerun once if the remote simply moved. If a commit hook rejected the merge commit (merge still in progress, no conflicts), commit it with `git commit -m "<message the hook accepts>"` and rerun. Never force-push. |
 
-After a PR is squash-merged on GitHub, keep working on the same branch and submit again: the merge brings in the squashed source, so the next PR shows only new work.
+After a PR is squash-merged on GitHub, keep working on the same branch and submit again. The runner recognises work already in the source: a branch holding nothing else restarts at the source tip, and the stale remote branch of the merged PR is replaced (`replaced_stale_remote`, with a lease on its exact SHA) so the next PR shows only new work. Commits a teammate pushed to the remote branch are merged, never replaced.
 
-The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches.
+The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches yourself; the runner's stale-branch replacement above is the only exception.
 
 ## status
 
