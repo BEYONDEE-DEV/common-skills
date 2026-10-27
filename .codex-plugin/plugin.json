@@ -1,6 +1,6 @@
 {
   "name": "common-skills",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "BEYONDEE shared agent skills for Codex and Claude Code.",
   "author": {
     "name": "BEYONDEE"
@@ -8,20 +8,19 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "BEYONDEE Skills",
-    "shortDescription": "Permanent multi-repo worktrees, ready PRs and branch promotion.",
-    "longDescription": "BEYONDEE Skills bundles shared agent skills for Codex and Claude Code. It currently exposes multi-repo-worktree for explicitly invoked permanent development worktrees with one-time create, squash-merge-safe generation branches, isolated PR corrections, source-to-prod branch promotion, and help, status, submit, promote, pull, and sync workflows.",
+    "shortDescription": "Submit PRs and promote branches across multiple repositories.",
+    "longDescription": "BEYONDEE Skills bundles shared agent skills for Codex and Claude Code. It currently exposes multi-repo, which handles a folder of independent Git repositories: submit commits task work, merges the latest source branch (resolving conflicts), pushes and creates or updates the PR; status reports branch, source and PR state; and promote advances remote branches through dev, dev2 and prod with fast-forward pushes only.",
     "developerName": "BEYONDEE",
     "category": "Productivity",
     "capabilities": [
-      "Multi Repo Worktree",
+      "Multi Repo",
       "Pull Requests",
       "Branch Promotion"
     ],
     "defaultPrompt": [
-      "Use $common-skills:multi-repo-worktree status to inspect the current development bundle.",
-      "Use $common-skills:multi-repo-worktree submit to publish ready PRs while preserving local follow-up work.",
-      "Use $common-skills:multi-repo-worktree sync to bring development worktrees up to date with their source branches.",
-      "Use $common-skills:multi-repo-worktree promote to advance the configured source branches through dev, dev2, and prod."
+      "Use $common-skills:multi-repo status to inspect every repository in this folder.",
+      "Use $common-skills:multi-repo submit to commit, merge the latest source, push and open PRs for every repository.",
+      "Use $common-skills:multi-repo promote to advance the source branches through dev, dev2, and prod."
     ]
   }
 }

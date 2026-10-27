@@ -15,9 +15,9 @@ BEYONDEE Skills is a shared agent-skill plugin that works in both **Codex** and 
 
 | Skill | Codex | Claude Code |
 |---|---|---|
-| Multi Repo Worktree | `$common-skills:multi-repo-worktree <keyword>` | `/common-skills:multi-repo-worktree <keyword>` |
+| Multi Repo | `$common-skills:multi-repo <keyword>` | `/common-skills:multi-repo <keyword>` |
 
-Multi Repo Worktree manages a permanent development bundle of independent Git repositories. Keywords: `help`, `status`, `create`, `submit`, `promote`, `pull`, `sync`. See [USAGE.ko.md](./USAGE.ko.md).
+Multi Repo handles every Git repository directly under a folder. Keywords: `status`, `submit` (commit, merge the latest source branch, push, create or update the PR), `promote` (fast-forward `dev → dev2 → prod`), `help`. See [USAGE.ko.md](./USAGE.ko.md).
 
 The skill scripts require Python 3.9+, `git`, and an authenticated `gh` CLI.
 
@@ -69,7 +69,7 @@ Inside an interactive Claude Code session the same steps are `/plugin marketplac
 ## Adding a Skill
 
 1. Create `skills/<skill-name>/SKILL.md` with `name` and `description` frontmatter. Both hosts read this file.
-2. Optionally add `skills/<skill-name>/agents/openai.yaml` for Codex display metadata and implicit-invocation policy. Claude Code ignores it, so state invocation limits in the `description` as well.
+2. Optionally add `skills/<skill-name>/agents/openai.yaml` for Codex display metadata and implicit-invocation policy. Claude Code ignores it; use `disable-model-invocation: true` in the `SKILL.md` frontmatter for explicit-only skills.
 3. Resolve bundled files from the skill directory (`<skill-dir>`), never from the session cwd.
 4. Avoid host-only tools in the skill body, or describe the equivalent for each host.
 5. Bump `version` in both `.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` (kept identical by `tests/test_plugin_marketplace.py`).
