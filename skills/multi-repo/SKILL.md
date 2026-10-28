@@ -77,11 +77,15 @@ api: feature-login (← dev) / 변경 2개 / 앞섬 3 · 뒤처짐 1 / 미푸시
 
 ## promote
 
-Advances remote branches `<from> -> dev -> dev2 -> prod` with fast-forward pushes only. `--from` defaults to the current branch's source; when it is already `dev` or `dev2`, the chain starts there. `--chain a,b,c` overrides the stages.
+Advances remote branches with fast-forward pushes only, along `<task branch> -> <source> -> dev -> dev2 -> prod` (stages before the source's place in the chain are skipped, so a task branch on `dev` goes `task -> dev -> dev2 -> prod`). The task branch going into the next stage directly, without a PR, is how work reaches `dev` immediately.
 
-1. Run `promote --from <branch>` to get the plan. Show the user, per repository, each step's `action` (`PUSH` with its `commits`, `UP_TO_DATE`, or `AHEAD` meaning that stage already contains more and its tip is carried forward) and any failed repository.
-2. The user's explicit `promote` request authorizes execution of the plan you showed: run the same command with `--execute <plan_id>`.
-3. Results: `PROMOTED` lists `promoted` stages; `UP_TO_DATE` needs nothing. `PLAN_CHANGED` means a remote moved after the plan was shown: nothing was pushed; show the new plan again. `DIVERGED` means a stage has commits the previous stage lacks: stop that repository and tell the user it needs a manual merge. `BRANCH_NOT_FOUND` / `PUSH_REJECTED` (for example branch protection) stop that repository; already pushed stages are reported in `promoted`, and rerunning resumes from the remaining stages.
+- The chain starts at the current branch; `--from <branch>` starts elsewhere (`--from dev` promotes only what `dev` already has). When the task branch holds nothing its source lacks (for example its PR was merged), the chain starts at the source.
+- `--to <stage>` stops there (`--to dev` for "dev에만"); `--chain a,b,c` overrides the stages.
+
+1. Run `promote [--from <branch>] [--to <stage>]` to get the plan. Show the user, per repository, each step's `action` (`PUSH` with its `commits`, `UP_TO_DATE`, or `AHEAD` meaning that stage already contains more and its tip is carried forward) and any failed repository.
+2. `SUBMIT_REQUIRED` means the task branch is not ready to push into the next stage (`reason`: `uncommitted`, `unpushed`, or `behind` the latest next stage). Run the submit steps for those repositories first (the `pr` text may be omitted, so `PR_TEXT_REQUIRED` is fine here), then plan again. If it is unclear whether the user meant to include the task's work, ask: include it (submit first) or promote only what the source has (`--from <source>`).
+3. The user's explicit `promote` request authorizes execution of the plan you showed: run the same command with `--execute <plan_id>`. When `task` is set (the task's work skips PR review), get the user's confirmation of the plan first unless they already asked to push it straight to `dev`. An open PR from the task branch is marked merged by GitHub once its commits reach the base.
+4. Results: `PROMOTED` lists `promoted` stages; `UP_TO_DATE` needs nothing. `PLAN_CHANGED` means a remote moved after the plan was shown: nothing was pushed; show the new plan again. `DIVERGED` means a stage has commits the previous stage lacks: stop that repository and tell the user it needs a manual merge. `BRANCH_NOT_FOUND` / `PUSH_REJECTED` (for example branch protection) stop that repository; already pushed stages are reported in `promoted`, and rerunning resumes from the remaining stages.
 
 Run `promote` only when the user asks for it.
 
@@ -92,7 +96,8 @@ multi-repo: 폴더 안의 Git 저장소들을 한 번에 다룹니다.
 
   status   저장소별 브랜치, source 대비 앞섬/뒤처짐, 미푸시 커밋, PR 상태
   submit   커밋 → 최신 source merge(충돌은 해결) → push → PR 생성/갱신
-  promote  원격 브랜치를 <source> → dev → dev2 → prod 순서로 fast-forward 승격
+  promote  작업 브랜치(또는 --from 브랜치)를 → dev → dev2 → prod 순서로 fast-forward 승격
+           (--to dev 로 dev까지만, PR 없이 dev에 바로 올릴 때도 사용)
 
 PR merge는 GitHub에서 직접 하세요. merge 후에도 같은 브랜치에서 계속 작업하고 submit하면 됩니다.
 ```

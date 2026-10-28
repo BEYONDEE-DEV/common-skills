@@ -381,6 +381,40 @@ class PromoteTests(MultiRepoTestCase):
         plan = self.ws.run("promote", "--from", "feature")
         self.assertEqual(plan["repositories"][0]["stages"], ["feature", "dev", "dev2", "prod"])
 
+    def test_task_branch_goes_straight_into_dev(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        tip = git(self.ws.api, "rev-parse", "HEAD")
+        plan = self.ws.run("promote", "--to", "dev")
+        result = plan["repositories"][0]
+        self.assertEqual((result["stages"], result["task"]), (["feature", "dev"], "feature"))
+        self.assertEqual([(s["to"], s["action"]) for s in result["steps"]], [("dev", "PUSH")])
+
+        prod = self.ws.remote_sha("prod")
+        done = self.ws.run("promote", "--to", "dev", "--execute", plan["plan_id"])
+        self.assertEqual(done["repositories"][0]["promoted"], ["dev"])
+        self.assertEqual((self.ws.remote_sha("dev"), self.ws.remote_sha("prod")), (tip, prod))
+
+    def test_unsubmitted_task_branch_requires_submit(self) -> None:
+        (self.ws.api / "a.txt").write_text("a\n", encoding="utf-8")
+        result = self.ws.repo_result("promote")
+        self.assertEqual((result["status"], result["reason"]), ("SUBMIT_REQUIRED", "uncommitted"))
+
+        git(self.ws.api, "add", "a.txt")
+        git(self.ws.api, "commit", "-q", "-m", "A")
+        result = self.ws.repo_result("promote")
+        self.assertEqual((result["status"], result["reason"]), ("SUBMIT_REQUIRED", "unpushed"))
+
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("promote")
+        self.assertEqual((result["status"], result["reason"]), ("SUBMIT_REQUIRED", "behind"))
+
+    def test_task_branch_without_new_work_starts_at_its_source(self) -> None:
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("promote")
+        self.assertEqual((result["status"], result["stages"], result["task"]), ("PLANNED", ["dev", "dev2", "prod"], None))
+
     def test_stale_plan_pushes_nothing(self) -> None:
         self.ws.advance("dev", "d.txt", "d\n", "D")
         plan = self.ws.run("promote", "--from", "dev")
@@ -412,7 +446,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("/common-skills:multi-repo", text)
         self.assertIn("scripts/multi_repo.py", text)
         for status in ("SOURCE_REQUIRED", "DIRTY", "CONFLICT", "PR_TEXT_REQUIRED", "CREATED", "UPDATED",
-                       "NO_CHANGES", "PROTECTED_BRANCH", "PUSH_REJECTED", "DIVERGED", "PLAN_CHANGED"):
+                       "NO_CHANGES", "PROTECTED_BRANCH", "PUSH_REJECTED", "DIVERGED", "PLAN_CHANGED",
+                       "SUBMIT_REQUIRED"):
             self.assertIn(status, text)
         yaml = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn("allow_implicit_invocation: false", yaml)

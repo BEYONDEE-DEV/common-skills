@@ -19,7 +19,7 @@
 |---|---|
 | `status` | 저장소별 현재 브랜치, source 대비 앞섬/뒤처짐, 미푸시 커밋, PR 상태 |
 | `submit` | 작업 커밋(한국어) → 최신 source merge(충돌은 에이전트가 해결) → push → PR 생성 또는 갱신 |
-| `promote` | 원격 브랜치를 `<source> → dev → dev2 → prod` 순서로 fast-forward 승격. 계획을 먼저 보여 준 뒤 실행 |
+| `promote` | 작업 브랜치를 `작업 브랜치 → <source> → dev → dev2 → prod` 순서로 fast-forward 승격(PR 없이 dev에 바로 올리기 포함). `--to dev`처럼 멈출 단계를 정할 수 있고, `dev`에 이미 있는 것만 올리려면 `dev부터`라고 말하면 됩니다. 계획을 먼저 보여 준 뒤 실행 |
 | `help` | 사용법 안내 |
 
 ### 기본 흐름
@@ -44,7 +44,11 @@
 /common-skills:multi-repo submit 로그인 개선 작업 PR 올려줘
 /common-skills:multi-repo submit source는 dev야
 /common-skills:multi-repo promote api, web 저장소만 prod까지 올려줘
+/common-skills:multi-repo promote 이번 작업 PR 없이 dev에 바로 올려줘
+/common-skills:multi-repo promote dev에 있는 것만 dev2로 올려줘
 ```
+
+promote할 때 작업이 아직 커밋·push되지 않았거나 최신 source가 합쳐져 있지 않으면, 에이전트가 먼저 submit한 뒤 승격합니다.
 
 Codex에서는 앞의 `/`를 `$`로 바꿔 사용합니다.
 

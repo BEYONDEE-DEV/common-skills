@@ -406,19 +406,45 @@ def load_plan(path: Path) -> dict[str, dict[str, Any]]:
 # --- promote ----------------------------------------------------------------
 
 
+def promote_stages(repo: Path, start: str, chain: list[str]) -> list[str]:
+    if start in chain:
+        return chain[chain.index(start):]
+    source = resolve_source(repo, start, None, None)[0]
+    if source in chain:
+        return [start, *chain[chain.index(source):]]
+    return [start, *([source] if source else []), *chain]
+
+
 def promote_plan(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
-    start = args.start
+    branch = current_branch(repo)
+    start = args.start or branch
     if not start:
-        branch = current_branch(repo)
-        start = resolve_source(repo, branch, None, None)[0] if branch else None
-        if not start:
-            raise Failure("SOURCE_REQUIRED", "promotion start branch is unknown; pass --from")
+        raise Failure("DETACHED", "HEAD is detached; pass --from")
     chain = list(args.chain)
-    stages = chain[chain.index(start):] if start in chain else [start, *chain]
+    if not args.start and start in PROTECTED - set(chain):
+        raise Failure("SOURCE_REQUIRED", f"{start} is not a promotion stage; pass --from")
+    stages = promote_stages(repo, start, chain)
+    if args.to:
+        if args.to not in stages[1:]:
+            raise Failure("USAGE", f"--to {args.to} is not a later stage of {' -> '.join(stages)}")
+        stages = stages[:stages.index(args.to) + 1]
+    # The checked-out task branch goes straight into the next stage, so it must be submitted first.
+    task = start == branch and start not in chain
+    if task and dirty_paths(repo):
+        raise Failure("SUBMIT_REQUIRED", f"{start} has uncommitted changes; submit it first",
+                      reason="uncommitted", stages=stages)
     if not args.offline:
-        missing = set(stages) - fetch_branches(repo, *stages)
+        missing = set(stages) - fetch_branches(repo, *stages) - ({start} if task else set())
         if missing:
             raise Failure("BRANCH_NOT_FOUND", f"{REMOTE} has no {', '.join(sorted(missing))}")
+    if task:
+        head = out(repo, "rev-parse", "HEAD")
+        if remote_sha(repo, stages[1]) and contained_in(repo, head, f"{REMOTE}/{stages[1]}"):
+            stages = stages[1:]  # nothing left on the task branch that the next stage lacks
+            task = False
+        elif remote_sha(repo, start) != head:
+            raise Failure("SUBMIT_REQUIRED", f"{start} has commits not pushed to {REMOTE}; submit it first",
+                          reason="unpushed", stages=stages)
     current = remote_sha(repo, stages[0])
     if not current:
         raise Failure("BRANCH_NOT_FOUND", f"{REMOTE}/{stages[0]} does not exist")
@@ -436,11 +462,14 @@ def promote_plan(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
         elif is_ancestor(repo, current, before):
             step["action"] = "AHEAD"  # stage already contains everything; carry its tip forward
             step["after"] = current = before
+        elif task and not steps:
+            raise Failure("SUBMIT_REQUIRED", f"{start} lacks the latest {REMOTE}/{stage}; submit it first",
+                          reason="behind", stages=stages)
         else:
             raise Failure("DIVERGED", f"{REMOTE}/{stage} has diverged from {REMOTE}/{previous}; integrate it manually",
                           steps=steps)
         steps.append(step)
-    return {"status": "PLANNED", "stages": stages, "steps": steps}
+    return {"status": "PLANNED", "stages": stages, "task": stages[0] if task else None, "steps": steps}
 
 
 def plan_id(results: list[dict[str, Any]]) -> str:
@@ -500,7 +529,8 @@ def main(argv: list[str] | None = None) -> int:
     submit.add_argument("--body-file", type=Path)
 
     promote = commands.add_parser("promote")
-    promote.add_argument("--from", dest="start", help="first branch; defaults to the current branch's source")
+    promote.add_argument("--from", dest="start", help="first branch; defaults to the current branch")
+    promote.add_argument("--to", help="last stage to push (for example dev)")
     promote.add_argument("--chain", type=lambda v: v.split(","), default=list(DEFAULT_CHAIN))
     promote.add_argument("--execute", metavar="PLAN_ID", help="push the plan previously shown with this id")
     promote.add_argument("--offline", action="store_true")
