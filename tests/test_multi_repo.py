@@ -29,8 +29,9 @@ FAKE_GH = textwrap.dedent(
         return args[args.index(name) + 1] if name in args else None
 
     if args[:2] == ["pr", "list"]:
-        head = opt("--head")
-        print(json.dumps([p for p in prs if p["headRefName"] == head]))
+        head, base, state = opt("--head"), opt("--base"), opt("--state")
+        print(json.dumps([p for p in prs if head in (None, p["headRefName"]) and base in (None, p["baseRefName"])
+                          and state in (None, "all", p["state"].lower())]))
     elif args[:2] == ["pr", "create"]:
         number = len(prs) + 1
         source = opt("--body-file")
@@ -361,6 +362,84 @@ class StatusTests(MultiRepoTestCase):
         self.assertEqual(result["pr"]["state"], "OPEN")
 
 
+class SyncTests(MultiRepoTestCase):
+    def test_sync_merges_source_locally_without_pushing(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        pushed = self.ws.remote_sha("feature")
+        source = self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("sync")
+        self.assertEqual((result["status"], result["unpushed"]), ("SYNCED", 2))
+        git(self.ws.api, "merge-base", "--is-ancestor", source, "HEAD")
+        self.assertEqual(self.ws.remote_sha("feature"), pushed)
+        self.assertEqual(len(self.ws.prs()), 1)
+        self.assertEqual(self.ws.repo_result("sync")["status"], "UP_TO_DATE")
+
+    def test_sync_skips_repository_with_uncommitted_changes(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        before = git(self.ws.api, "rev-parse", "HEAD")
+        (self.ws.api / "wip.txt").write_text("wip\n", encoding="utf-8")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("sync", "--source", "dev")
+        self.assertEqual((result["status"], result["dirty"]), ("DIRTY", ["wip.txt"]))
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD"), before)
+
+    def test_sync_conflict_is_resumed_after_resolution(self) -> None:
+        self.ws.commit(self.ws.api, "base.txt", "mine\n", "내 변경")
+        self.ws.advance("dev", "base.txt", "theirs\n", "상대 변경")
+        self.assertEqual(self.ws.repo_result("sync", "--source", "dev")["conflicts"], ["base.txt"])
+        (self.ws.api / "base.txt").write_text("both\n", encoding="utf-8")
+        git(self.ws.api, "add", "base.txt")
+        self.assertEqual(self.ws.repo_result("sync")["status"], "SYNCED")
+        self.assertEqual(git(self.ws.api, "status", "--porcelain"), "")
+        self.assertIn("상대 변경", git(self.ws.api, "log", "--format=%s"))
+
+    def squash_merge_pr(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        self.tip = self.ws.advance("dev", "a.txt", "a\n", "A (#1)")
+        prs = self.ws.prs()
+        prs[0].update(state="MERGED", headRefOid=self.ws.remote_sha("feature"))
+        self.ws.gh_state.write_text(json.dumps(prs), encoding="utf-8")
+
+    def test_sync_after_merge_restarts_at_source_and_deletes_remote_branch(self) -> None:
+        self.squash_merge_pr()
+        merged = self.ws.remote_sha("feature")
+        result = self.ws.repo_result("sync")
+        self.assertEqual((result["status"], result["head"], result["deleted_remote"]), ("SYNCED", self.tip, merged))
+        self.assertIn("moved_to_source", result)
+        self.assertNotIn("feature", git(self.ws.remote, "branch"))
+        self.assertEqual(self.ws.repo_result("sync")["status"], "UP_TO_DATE")
+
+    def test_sync_keeps_remote_branch_of_open_pr_or_with_new_work(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("sync")
+        self.assertNotIn("deleted_remote", result)
+        self.assertIn("feature", git(self.ws.remote, "branch"))
+
+        self.ws.advance("dev", "a.txt", "a\n", "A (#1)")  # content is in dev but the PR is still open
+        result = self.ws.repo_result("sync")
+        self.assertEqual(result["remote_kept"], "PR #1 is still open")
+        self.assertIn("feature", git(self.ws.remote, "branch"))
+
+
+    def test_sync_never_deletes_a_shared_source_branch(self) -> None:
+        self.squash_merge_pr()
+        git(self.ws.api, "config", "branch.other.multiRepoSource", "feature")  # another task builds on it
+        result = self.ws.repo_result("sync")
+        self.assertEqual(result["remote_kept"], "feature is the source of other branches or open PRs")
+        self.assertIn("feature", git(self.ws.remote, "branch"))
+
+    def test_sync_without_merged_pr_keeps_remote_branch(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev")  # pushed, no PR
+        self.ws.advance("dev", "a.txt", "a\n", "A")
+        result = self.ws.repo_result("sync")
+        self.assertEqual(result["remote_kept"], "no merged PR from this branch")
+
+
 class PromoteTests(MultiRepoTestCase):
     def test_plan_then_execute_fast_forwards_each_stage(self) -> None:
         tip = self.ws.advance("dev", "d.txt", "d\n", "배포할 변경")
@@ -447,7 +526,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("scripts/multi_repo.py", text)
         for status in ("SOURCE_REQUIRED", "DIRTY", "CONFLICT", "PR_TEXT_REQUIRED", "CREATED", "UPDATED",
                        "NO_CHANGES", "PROTECTED_BRANCH", "PUSH_REJECTED", "DIVERGED", "PLAN_CHANGED",
-                       "SUBMIT_REQUIRED"):
+                       "SUBMIT_REQUIRED", "SYNCED"):
             self.assertIn(status, text)
         yaml = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn("allow_implicit_invocation: false", yaml)

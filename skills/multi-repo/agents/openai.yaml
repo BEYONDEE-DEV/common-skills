@@ -1,6 +1,6 @@
 interface:
   display_name: "Multi Repo"
-  short_description: "Submit PRs, sync with source and promote across repositories."
+  short_description: "Sync with source, submit PRs and promote across repositories."
   default_prompt: "Use $common-skills:multi-repo submit to commit, merge the latest source, push and open PRs for every repository."
 
 policy:

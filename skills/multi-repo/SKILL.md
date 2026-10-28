@@ -1,6 +1,6 @@
 ---
 name: multi-repo
-description: "Use only when the user explicitly invokes `$common-skills:multi-repo` (Codex) or `/common-skills:multi-repo` (Claude Code). Submits task branches across a folder of independent Git repositories (commit, merge the latest source branch, push, create or update the PR), shows their status, and promotes branches through dev, dev2 and prod with fast-forward pushes."
+description: "Use only when the user explicitly invokes `$common-skills:multi-repo` (Codex) or `/common-skills:multi-repo` (Claude Code). Submits task branches across a folder of independent Git repositories (commit, merge the latest source branch, push, create or update the PR), syncs task branches with the latest source locally (deleting merged remote branches), shows their status, and promotes branches through dev, dev2 and prod with fast-forward pushes."
 disable-model-invocation: true
 ---
 
@@ -9,8 +9,8 @@ disable-model-invocation: true
 Operate on every Git repository directly under a bundle folder (or on one repository). Each repository is handled independently: one failing or waiting never stops the others.
 
 ```text
-$common-skills:multi-repo <status|submit|promote|help> [free-form intent]     # Codex
-/common-skills:multi-repo <status|submit|promote|help> [free-form intent]     # Claude Code
+$common-skills:multi-repo <status|sync|submit|promote|help> [free-form intent]     # Codex
+/common-skills:multi-repo <status|sync|submit|promote|help> [free-form intent]     # Claude Code
 ```
 
 Without a keyword, or with `help`, show the help block at the end and stop.
@@ -65,7 +65,20 @@ Without `--prepare`/`--plan`, `submit` runs step 3 with no commits for every rep
 
 After a PR is squash-merged on GitHub, keep working on the same branch and submit again. The runner recognises work already in the source: a branch holding nothing else restarts at the source tip, and the stale remote branch of the merged PR is replaced (`replaced_stale_remote`, with a lease on its exact SHA) so the next PR shows only new work. Commits a teammate pushed to the remote branch are merged, never replaced.
 
-The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches yourself; the runner's stale-branch replacement above is the only exception.
+The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches yourself; the runner's stale-branch replacement above and `sync`'s merged-branch deletion are the only exceptions.
+
+## sync
+
+Brings every selected repository's checked-out task branch up to the latest source without committing, pushing or creating PRs: `sync [--source <branch>]`. It uses the same merge rules as submit (teammates' pushes, then the source; a branch holding only merged work restarts at the source tip). When a PR from the task branch was merged, everything on its remote branch is already in the source, no PR is open from it, and no other branch or open PR uses it as a source, that remote branch is deleted (`deleted_remote`, with a lease on its exact SHA). `main`, `master`, `dev`, `dev2` and `prod` are never deleted; otherwise `remote_kept` says why it stayed.
+
+| status | meaning | next step |
+|---|---|---|
+| `SYNCED` | The branch now contains the latest source (`unpushed` counts local commits not on the remote). | Done. |
+| `UP_TO_DATE` | Nothing to bring in. | Done. |
+| `DIRTY` | Uncommitted changes (`dirty`); the repository was skipped untouched. | Report it; do not commit or stash for the user. |
+| `CONFLICT` | Same as submit. | Resolve, `git add`, rerun `--repo <name> sync`; it completes the merge commit. |
+
+`SOURCE_REQUIRED`, `PROTECTED_BRANCH` and the error statuses mean the same as for submit.
 
 ## status
 
@@ -95,6 +108,8 @@ Run `promote` only when the user asks for it.
 multi-repo: 폴더 안의 Git 저장소들을 한 번에 다룹니다.
 
   status   저장소별 브랜치, source 대비 앞섬/뒤처짐, 미푸시 커밋, PR 상태
+  sync     지금 브랜치에 최신 source 받아오기(커밋·push·PR 없음, 미커밋 변경 있으면 건너뜀)
+           + 머지 끝난 원격 작업 브랜치 삭제
   submit   커밋 → 최신 source merge(충돌은 해결) → push → PR 생성/갱신
   promote  작업 브랜치(또는 --from 브랜치)를 → dev → dev2 → prod 순서로 fast-forward 승격
            (--to dev 로 dev까지만, PR 없이 dev에 바로 올릴 때도 사용)

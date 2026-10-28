@@ -18,6 +18,7 @@
 | 키워드 | 하는 일 |
 |---|---|
 | `status` | 저장소별 현재 브랜치, source 대비 앞섬/뒤처짐, 미푸시 커밋, PR 상태 |
+| `sync` | 지금 브랜치에 최신 source를 받아옵니다(커밋·push·PR 없음). 커밋하지 않은 변경이 있는 저장소는 건너뛰고, PR이 머지되어 내용이 모두 source에 들어간 원격 작업 브랜치는 삭제합니다(열린 PR이 있거나 다른 브랜치의 source로 쓰이는 브랜치, `main`·`master`·`dev`·`dev2`·`prod`는 삭제하지 않음) |
 | `submit` | 작업 커밋(한국어) → 최신 source merge(충돌은 에이전트가 해결) → push → PR 생성 또는 갱신 |
 | `promote` | 작업 브랜치를 `작업 브랜치 → <source> → dev → dev2 → prod` 순서로 fast-forward 승격(PR 없이 dev에 바로 올리기 포함). `--to dev`처럼 멈출 단계를 정할 수 있고, `dev`에 이미 있는 것만 올리려면 `dev부터`라고 말하면 됩니다. 계획을 먼저 보여 준 뒤 실행 |
 | `help` | 사용법 안내 |
@@ -28,6 +29,7 @@
 작업 브랜치에서 A 개발 → submit (PR A 생성)
   → 계속 개발 → submit (source 최신화 + PR A 갱신)
   → GitHub에서 PR A merge (squash 가능)
+  → sync (최신 source 받아오기 + 머지된 원격 브랜치 정리)
   → 같은 브랜치에서 B 개발 → submit (source merge 후 PR B 생성, B 변경만 포함)
 ```
 
@@ -41,6 +43,7 @@
 
 ```text
 /common-skills:multi-repo status
+/common-skills:multi-repo sync
 /common-skills:multi-repo submit 로그인 개선 작업 PR 올려줘
 /common-skills:multi-repo submit source는 dev야
 /common-skills:multi-repo promote api, web 저장소만 prod까지 올려줘

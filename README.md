@@ -17,7 +17,7 @@ BEYONDEE Skills is a shared agent-skill plugin that works in both **Codex** and 
 |---|---|---|
 | Multi Repo | `$common-skills:multi-repo <keyword>` | `/common-skills:multi-repo <keyword>` |
 
-Multi Repo handles every Git repository directly under a folder. Keywords: `status`, `submit` (commit, merge the latest source branch, push, create or update the PR), `promote` (fast-forward the task branch or a stage through `dev → dev2 → prod`), `help`. See [USAGE.ko.md](./USAGE.ko.md).
+Multi Repo handles every Git repository directly under a folder. Keywords: `status`, `sync` (merge the latest source locally and delete merged remote branches), `submit` (commit, merge the latest source branch, push, create or update the PR), `promote` (fast-forward the task branch or a stage through `dev → dev2 → prod`), `help`. See [USAGE.ko.md](./USAGE.ko.md).
 
 The skill scripts require Python 3.9+, `git`, and an authenticated `gh` CLI.
 

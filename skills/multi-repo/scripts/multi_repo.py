@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Status, submit and promote for a folder of independent Git repositories.
+"""Status, sync, submit and promote for a folder of independent Git repositories.
 
 Every command prints one JSON document on stdout. Per-repository outcomes are
 reported in ``repositories[].status``; repositories run concurrently and one
@@ -202,14 +202,20 @@ def pr_material(repo: Path, source: str, prs: list[dict[str, Any]]) -> dict[str,
 # --- shared submit context ----------------------------------------------------
 
 
-def submit_context(repo: Path, source_arg: str | None) -> dict[str, Any]:
+def submit_context(repo: Path, source_arg: str | None, need_gh: bool = True) -> dict[str, Any]:
     """Resolve branch, PR and source, fetch them, and refuse unsafe branches."""
     branch = current_branch(repo)
     if not branch:
         raise Failure("DETACHED", "HEAD is detached; check out the task branch first")
     if branch in PROTECTED:
         raise Failure("PROTECTED_BRANCH", f"refusing to submit from {branch}; use a task branch", branch=branch)
-    prs = list_prs(repo, branch)
+    gh_ok = True
+    try:
+        prs = list_prs(repo, branch)
+    except Failure:
+        if need_gh:
+            raise
+        gh_ok, prs = False, []  # sync still works locally; it only skips the remote cleanup
     pr = choose_pr(prs)
     source, origin = resolve_source(repo, branch, source_arg, pr)
     if not source:
@@ -221,7 +227,7 @@ def submit_context(repo: Path, source_arg: str | None) -> dict[str, Any]:
         raise Failure("SOURCE_NOT_FOUND", f"{REMOTE}/{source} does not exist", source=source)
     git(repo, "config", f"branch.{branch}.{SOURCE_CONFIG}", source)
     open_pr = pr if pr and pr["state"] == "OPEN" else None
-    return {"branch": branch, "source": source, "source_from": origin, "prs": prs, "open_pr": open_pr}
+    return {"branch": branch, "source": source, "source_from": origin, "prs": prs, "open_pr": open_pr, "gh_ok": gh_ok}
 
 
 def public(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -323,22 +329,8 @@ def commit_entry(repo: Path, commit: dict[str, Any]) -> bool:
     return True
 
 
-def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | None = None) -> dict[str, Any]:
-    entry = entry or {}
-    ctx = submit_context(repo, args.source)
-    base = public(ctx)
-
-    if merging(repo):
-        conflicts = conflict_paths(repo)
-        if conflicts:
-            return {**base, "status": "CONFLICT", "conflicts": conflicts}
-        git(repo, "commit", "--no-edit")
-    if entry.get("commit"):
-        base["committed"] = commit_entry(repo, entry["commit"])
-    dirty = dirty_paths(repo)
-    if dirty:
-        return {**base, "status": "DIRTY", "dirty": dirty}
-
+def integrate(repo: Path, ctx: dict[str, Any], base: dict[str, Any]) -> tuple[str | None, bool, dict[str, Any] | None]:
+    """Bring teammates' pushes and the latest source into HEAD. Returns (remote head, stale, conflict)."""
     branch, source = ctx["branch"], ctx["source"]
     source_ref, source_sha = f"{REMOTE}/{source}", remote_sha(repo, source)
     # A remote task branch whose work is already in the source (its PR was squash-merged) is stale:
@@ -348,19 +340,107 @@ def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | Non
     if remote_head and not stale_remote:
         conflict = merge_into_head(repo, f"{REMOTE}/{branch}")
         if conflict:
-            return {**base, **conflict}
+            return remote_head, stale_remote, conflict
 
     head = out(repo, "rev-parse", "HEAD")
     if head != source_sha and contained_in(repo, head, source_ref):
         # Everything on the branch is already in the source: restart it at the source tip instead of
-        # adding a merge commit. Nothing is lost (the worktree is clean and the source holds all of it);
-        # `switch -C` refuses to overwrite untracked files.
+        # adding a merge commit. Nothing is lost (the source holds all of it); `switch -C` carries
+        # uncommitted changes along and refuses to overwrite them or untracked files.
         git(repo, "switch", "-q", "-C", branch, source_sha)
         base["moved_to_source"] = head
-    else:
-        conflict = merge_into_head(repo, source_ref)
-        if conflict:
-            return {**base, **conflict}
+        return remote_head, stale_remote, None
+    return remote_head, stale_remote, merge_into_head(repo, source_ref)
+
+
+def finish_merge(repo: Path) -> list[str]:
+    """Commit a merge whose conflicts were resolved; return the paths still conflicted."""
+    if merging(repo):
+        conflicts = conflict_paths(repo)
+        if conflicts:
+            return conflicts
+        git(repo, "commit", "--no-edit")
+    return []
+
+
+def is_source_branch(repo: Path, branch: str) -> bool:
+    """True when a local branch merges from ``branch`` or an open PR targets it."""
+    configured = git(repo, "config", "--get-regexp", rf"^branch\..*\.{SOURCE_CONFIG}$", check=False).stdout
+    if any(line.split()[-1] == branch for line in configured.splitlines() if line.strip()):
+        return True
+    proc = run(["gh", "pr", "list", "--base", branch, "--state", "open", "--limit", "1", "--json", "number"],
+               repo, check=False)
+    return proc.returncode != 0 or proc.stdout.strip() not in ("", "[]")
+
+
+def delete_merged_remote(repo: Path, ctx: dict[str, Any], sha: str) -> dict[str, Any]:
+    """Delete the remote task branch whose work is all in the source, unless a PR still uses it."""
+    branch = ctx["branch"]
+    if branch in PROTECTED:
+        return {"remote_kept": f"{branch} is a protected branch"}
+    if not ctx["gh_ok"]:
+        return {"remote_kept": "gh is unavailable, so an open PR cannot be ruled out"}
+    if ctx["open_pr"]:
+        return {"remote_kept": f"PR #{ctx['open_pr']['number']} is still open"}
+    # Only a task branch whose own PR was merged goes; shared branches others build on stay.
+    if not any(pr.get("state") == "MERGED" for pr in ctx["prs"]):
+        return {"remote_kept": "no merged PR from this branch"}
+    if is_source_branch(repo, branch):
+        return {"remote_kept": f"{branch} is the source of other branches or open PRs"}
+    # The lease makes the deletion fail if anyone pushed to the branch since it was fetched.
+    proc = git(repo, "push", f"--force-with-lease=refs/heads/{branch}:{sha}", REMOTE, f":refs/heads/{branch}",
+               check=False)
+    if proc.returncode != 0:
+        return {"remote_kept": (proc.stderr or proc.stdout).strip()}
+    git(repo, "branch", "--unset-upstream", check=False)
+    return {"deleted_remote": sha}
+
+
+def sync_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
+    """Bring the checked-out task branch up to the latest source; commits and pushes nothing.
+
+    A repository with uncommitted changes is skipped untouched. The remote task branch is deleted
+    once everything on it is in the source (its PR was merged).
+    """
+    ctx = submit_context(repo, args.source, need_gh=False)
+    base = public(ctx)
+    before = out(repo, "rev-parse", "HEAD")
+    conflicts = finish_merge(repo)
+    if conflicts:
+        return {**base, "status": "CONFLICT", "conflicts": conflicts}
+    dirty = dirty_paths(repo)
+    if dirty:
+        return {**base, "status": "DIRTY", "dirty": dirty}
+    remote_head, stale_remote, conflict = integrate(repo, ctx, base)
+    if conflict:
+        return {**base, **conflict}
+    if stale_remote:
+        base.update(delete_merged_remote(repo, ctx, remote_head))
+    head = out(repo, "rev-parse", "HEAD")
+    pushed = remote_sha(repo, ctx["branch"])
+    return {**base, "status": "SYNCED" if head != before else "UP_TO_DATE", "head": head,
+            "unpushed": ahead_behind(repo, pushed)[0] if pushed else None}
+
+
+def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    entry = entry or {}
+    ctx = submit_context(repo, args.source)
+    base = public(ctx)
+
+    conflicts = finish_merge(repo)
+    if conflicts:
+        return {**base, "status": "CONFLICT", "conflicts": conflicts}
+    if entry.get("commit"):
+        base["committed"] = commit_entry(repo, entry["commit"])
+    dirty = dirty_paths(repo)
+    if dirty:
+        return {**base, "status": "DIRTY", "dirty": dirty}
+
+    branch, source = ctx["branch"], ctx["source"]
+    source_ref = f"{REMOTE}/{source}"
+    remote_head, stale_remote, conflict = integrate(repo, ctx, base)
+    if conflict:
+        return {**base, **conflict}
 
     open_pr = ctx["open_pr"]
     if git(repo, "diff", "--quiet", source_ref, "HEAD", check=False).returncode == 0:
@@ -520,6 +600,9 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--source")
     status.add_argument("--offline", action="store_true", help="skip git fetch")
 
+    sync = commands.add_parser("sync")
+    sync.add_argument("--source", help="source branch to merge from")
+
     submit = commands.add_parser("submit")
     submit.add_argument("--source", help="source branch to merge from and open the PR against")
     mode = submit.add_mutually_exclusive_group()
@@ -551,6 +634,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     repos = discover(args.root, args.repo)
     if args.command == "status":
         return {"repositories": each(repos, lambda r: status_one(r, args))}
+    if args.command == "sync":
+        return {"repositories": each(repos, lambda r: sync_one(r, args))}
     if args.command == "submit":
         if (args.title or args.body_file) and (len(repos) != 1 or args.plan or args.prepare):
             raise Failure("USAGE", "--title/--body-file apply to exactly one --repo without --plan/--prepare")
