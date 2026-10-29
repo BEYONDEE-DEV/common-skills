@@ -3,8 +3,11 @@
 
 Every command prints one JSON document on stdout. Per-repository outcomes are
 reported in ``repositories[].status``; repositories run concurrently and one
-failing never stops the others. The script never force-pushes, resets,
-rebases or merges PRs.
+failing never stops the others. A task branch holding only the user's own
+commits is rebased onto its source and pushed with a lease on the remote SHA it
+replaces; shared branches are merged instead. The script never rewrites
+``main``, ``master``, ``dev``, ``dev2`` or ``prod``, never resets and never
+merges PRs.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ ENV = {
     **os.environ,
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_MERGE_AUTOEDIT": "no",
+    "GIT_EDITOR": "true",  # `rebase --continue` keeps the original message instead of opening an editor
     "GH_PROMPT_DISABLED": "1",
     "GH_NO_UPDATE_NOTIFIER": "1",
 }
@@ -95,9 +99,35 @@ def discover(root: Path, selected: list[str]) -> list[Path]:
 # --- git state --------------------------------------------------------------
 
 
+def git_path(repo: Path, name: str) -> Path:
+    path = Path(out(repo, "rev-parse", "--git-path", name))
+    return path if path.is_absolute() else repo / path
+
+
+def rebase_dir(repo: Path) -> Path | None:
+    for name in ("rebase-merge", "rebase-apply"):
+        path = git_path(repo, name)
+        if path.is_dir():
+            return path
+    return None
+
+
+def rebasing(repo: Path) -> bool:
+    return rebase_dir(repo) is not None
+
+
 def current_branch(repo: Path) -> str | None:
     proc = git(repo, "symbolic-ref", "-q", "--short", "HEAD", check=False)
-    return proc.stdout.strip() if proc.returncode == 0 else None
+    if proc.returncode == 0:
+        return proc.stdout.strip()
+    # A rebase stopped on a conflict detaches HEAD; the branch being rebased is still the task branch.
+    directory = rebase_dir(repo)
+    head_name = directory / "head-name" if directory else None
+    if head_name and head_name.is_file():
+        name = head_name.read_text(encoding="utf-8").strip()
+        if name.startswith("refs/heads/"):
+            return name[len("refs/heads/"):]
+    return None
 
 
 def remote_sha(repo: Path, branch: str) -> str | None:
@@ -240,7 +270,7 @@ def public(ctx: dict[str, Any]) -> dict[str, Any]:
 def status_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
     branch = current_branch(repo)
     result: dict[str, Any] = {"status": "OK" if branch else "DETACHED", "branch": branch,
-                              "dirty": dirty_paths(repo), "merging": merging(repo)}
+                              "dirty": dirty_paths(repo), "merging": merging(repo), "rebasing": rebasing(repo)}
     if not branch:
         return result
     pr = None
@@ -267,7 +297,7 @@ def prepare_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
     """Everything the agent needs to write one plan entry, without changing the branch."""
     ctx = submit_context(repo, args.source)
     result: dict[str, Any] = {**public(ctx), "status": "READY", "pr": ctx["open_pr"]}
-    if merging(repo) and conflict_paths(repo):
+    if (merging(repo) or rebasing(repo)) and conflict_paths(repo):
         return {**result, "status": "CONFLICT", "conflicts": conflict_paths(repo)}
     dirty = dirty_paths(repo)
     result["dirty"] = dirty
@@ -310,6 +340,35 @@ def merge_into_head(repo: Path, target: str) -> dict[str, Any] | None:
     raise Failure("MERGE_FAILED", (proc.stderr or proc.stdout).strip())
 
 
+def rebase_onto(repo: Path, target: str) -> dict[str, Any] | None:
+    """Replay HEAD's own commits on ``target`` as a straight line (merge commits are dropped).
+
+    Returns a CONFLICT outcome or None on success.
+    """
+    if is_ancestor(repo, target, "HEAD") and not out(repo, "rev-list", "--merges", f"{target}..HEAD"):
+        return None
+    proc = git(repo, "rebase", "--empty=drop", target, check=False)
+    if proc.returncode == 0:
+        return None
+    conflicts = conflict_paths(repo)
+    if conflicts:
+        return {"status": "CONFLICT", "rebasing": target, "conflicts": conflicts}
+    raise Failure("REBASE_FAILED", (proc.stderr or proc.stdout).strip())
+
+
+def committed_by_user(repo: Path, base: str) -> bool:
+    """True when every commit HEAD adds to ``base`` was committed by this user, so rewriting them harms nobody."""
+    email = git(repo, "config", "--get", "user.email", check=False).stdout.strip().lower()
+    committers = out(repo, "log", "--format=%ce", f"{base}..HEAD").lower().splitlines()
+    return bool(email) and all(committer == email for committer in committers)
+
+
+def seen_locally(repo: Path, branch: str, sha: str) -> bool:
+    """True when the local branch once pointed at ``sha`` (it is this checkout's own earlier push)."""
+    proc = git(repo, "log", "-g", "--format=%H", f"refs/heads/{branch}", check=False)
+    return proc.returncode == 0 and sha in proc.stdout.split()
+
+
 def commit_entry(repo: Path, commit: dict[str, Any]) -> bool:
     """Stage exactly the planned paths and commit them; a rerun with nothing left is a no-op."""
     paths, message = commit.get("paths") or [], (commit.get("message") or "").strip()
@@ -330,14 +389,22 @@ def commit_entry(repo: Path, commit: dict[str, Any]) -> bool:
 
 
 def integrate(repo: Path, ctx: dict[str, Any], base: dict[str, Any]) -> tuple[str | None, bool, dict[str, Any] | None]:
-    """Bring teammates' pushes and the latest source into HEAD. Returns (remote head, stale, conflict)."""
+    """Bring teammates' pushes and the latest source into HEAD. Returns (remote head, stale, conflict).
+
+    A branch holding only the user's own commits is rebased onto the source so its history stays a straight
+    line; submit then replaces the remote branch with a lease. A branch with someone else's commits, or one
+    other branches or open PRs build on, gets the source merged instead so nobody's commits are rewritten.
+    """
     branch, source = ctx["branch"], ctx["source"]
     source_ref, source_sha = f"{REMOTE}/{source}", remote_sha(repo, source)
     # A remote task branch whose work is already in the source (its PR was squash-merged) is stale:
     # never merge it back, and replace it on push instead of stacking new work on top of it.
     remote_head = remote_sha(repo, branch)
     stale_remote = bool(remote_head) and contained_in(repo, remote_head, source_ref)
-    if remote_head and not stale_remote:
+    # The remote is this checkout's own earlier push (for example before the last rebase) when the local
+    # branch once pointed at it; anything else on it came from elsewhere and is merged, never replaced.
+    if (remote_head and not stale_remote and not is_ancestor(repo, remote_head, "HEAD")
+            and not seen_locally(repo, branch, remote_head)):
         conflict = merge_into_head(repo, f"{REMOTE}/{branch}")
         if conflict:
             return remote_head, stale_remote, conflict
@@ -350,16 +417,28 @@ def integrate(repo: Path, ctx: dict[str, Any], base: dict[str, Any]) -> tuple[st
         git(repo, "switch", "-q", "-C", branch, source_sha)
         base["moved_to_source"] = head
         return remote_head, stale_remote, None
+    if committed_by_user(repo, source_ref) and not is_source_branch(repo, branch):
+        return remote_head, stale_remote, rebase_onto(repo, source_ref)
+    base["merged_source"] = True
     return remote_head, stale_remote, merge_into_head(repo, source_ref)
 
 
-def finish_merge(repo: Path) -> list[str]:
-    """Commit a merge whose conflicts were resolved; return the paths still conflicted."""
+def finish_pending(repo: Path) -> list[str]:
+    """Complete a merge or rebase whose conflicts were resolved; return the paths still conflicted."""
     if merging(repo):
         conflicts = conflict_paths(repo)
         if conflicts:
             return conflicts
         git(repo, "commit", "--no-edit")
+    while rebasing(repo):
+        conflicts = conflict_paths(repo)
+        if conflicts:
+            return conflicts
+        # A resolution that leaves nothing to commit means the commit is already in the source: skip it.
+        nothing_staged = git(repo, "diff", "--cached", "--quiet", "HEAD", check=False).returncode == 0
+        proc = git(repo, "rebase", "--skip" if nothing_staged else "--continue", check=False)
+        if proc.returncode != 0 and not conflict_paths(repo):
+            raise Failure("REBASE_FAILED", (proc.stderr or proc.stdout).strip())
     return []
 
 
@@ -405,7 +484,7 @@ def sync_one(repo: Path, args: argparse.Namespace) -> dict[str, Any]:
     ctx = submit_context(repo, args.source, need_gh=False)
     base = public(ctx)
     before = out(repo, "rev-parse", "HEAD")
-    conflicts = finish_merge(repo)
+    conflicts = finish_pending(repo)
     if conflicts:
         return {**base, "status": "CONFLICT", "conflicts": conflicts}
     dirty = dirty_paths(repo)
@@ -427,7 +506,7 @@ def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | Non
     ctx = submit_context(repo, args.source)
     base = public(ctx)
 
-    conflicts = finish_merge(repo)
+    conflicts = finish_pending(repo)
     if conflicts:
         return {**base, "status": "CONFLICT", "conflicts": conflicts}
     if entry.get("commit"):
@@ -450,9 +529,10 @@ def submit_one(repo: Path, args: argparse.Namespace, entry: dict[str, Any] | Non
     pushed = False
     if remote_head != head:
         push = ["push", "-u", REMOTE, f"HEAD:refs/heads/{branch}"]
-        if stale_remote and not is_ancestor(repo, remote_head, head):
+        if remote_head and not is_ancestor(repo, remote_head, head):
+            # A rebased branch or the stale branch of a merged PR: the lease refuses if anyone pushed since.
             push.insert(1, f"--force-with-lease=refs/heads/{branch}:{remote_head}")
-            base["replaced_stale_remote"] = remote_head
+            base["replaced_stale_remote" if stale_remote else "rewrote_remote"] = remote_head
         proc = git(repo, *push, check=False)
         if proc.returncode != 0:
             raise Failure("PUSH_REJECTED", (proc.stderr or proc.stdout).strip())
@@ -601,10 +681,10 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--offline", action="store_true", help="skip git fetch")
 
     sync = commands.add_parser("sync")
-    sync.add_argument("--source", help="source branch to merge from")
+    sync.add_argument("--source", help="source branch to rebase onto or merge from")
 
     submit = commands.add_parser("submit")
-    submit.add_argument("--source", help="source branch to merge from and open the PR against")
+    submit.add_argument("--source", help="source branch to rebase onto (or merge from) and open the PR against")
     mode = submit.add_mutually_exclusive_group()
     mode.add_argument("--prepare", action="store_true", help="report what each repository needs; change nothing")
     mode.add_argument("--plan", type=Path, help="JSON plan with per-repository commit and PR text")

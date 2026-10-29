@@ -84,21 +84,28 @@ class Workspace:
     def clone(self, name: str, branch: str) -> Path:
         path = self.bundle / name
         git(self.bundle, "clone", "-q", str(self.remote), name)
+        git(path, "config", "user.email", "t@example.invalid")  # the user's own commits may be rebased
         git(path, "switch", "-q", "-c", branch, "origin/dev")
         return path
 
-    def commit(self, repo: Path, name: str, text: str, message: str) -> str:
+    def commit(self, repo: Path, name: str, text: str, message: str, email: str | None = None) -> str:
         (repo / name).write_text(text, encoding="utf-8")
         git(repo, "add", name)
-        git(repo, "commit", "-q", "-m", message)
+        identity = ["-c", f"user.email={email}"] if email else []
+        env = {**os.environ, "GIT_COMMITTER_EMAIL": email} if email else None
+        subprocess.run(["git", *identity, "commit", "-q", "-m", message], cwd=repo, check=True, env=env)
         return git(repo, "rev-parse", "HEAD")
 
     def advance(self, branch: str, name: str, text: str, message: str) -> str:
+        """A teammate commits to ``branch`` on the remote."""
         git(self.seed, "fetch", "-q", "origin")
         git(self.seed, "switch", "-q", "-C", branch, f"origin/{branch}")
-        sha = self.commit(self.seed, name, text, message)
+        sha = self.commit(self.seed, name, text, message, email="mate@example.invalid")
         git(self.seed, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
         return sha
+
+    def merges(self, repo_or_remote: Path, revs: str) -> int:
+        return int(git(repo_or_remote, "rev-list", "--merges", "--count", revs))
 
     def run(self, *args: str) -> dict:
         proc = subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.bundle), *args],
@@ -163,14 +170,40 @@ class SubmitTests(MultiRepoTestCase):
         (self.ws.api / "node_modules" / "x.js").write_text("", encoding="utf-8")
         self.assertEqual(self.ws.repo_result("submit", "--source", "dev")["status"], "PR_TEXT_REQUIRED")
 
-    def test_submit_merges_advanced_source_and_updates_open_pr(self) -> None:
+    def test_submit_rebases_onto_advanced_source_and_updates_open_pr(self) -> None:
         self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
         self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        before = self.ws.remote_sha("feature")
         source = self.ws.advance("dev", "other.txt", "o\n", "다른 작업")
         result = self.ws.repo_result("submit")
         self.assertEqual(result["status"], "UPDATED")
         self.assertTrue(result["pushed"])
-        git(self.ws.remote, "merge-base", "--is-ancestor", source, "feature")
+        self.assertEqual(result["rewrote_remote"], before)
+        self.assertEqual(git(self.ws.remote, "rev-parse", "feature^"), source, "own commit sits on the source tip")
+        self.assertEqual(git(self.ws.remote, "log", "-1", "--format=%s", "feature"), "A")
+        self.assertEqual(self.ws.merges(self.ws.remote, "dev..feature"), 0)
+
+    def test_existing_merge_commits_are_flattened_on_submit(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        git(self.ws.api, "fetch", "-q", "origin")
+        git(self.ws.api, "merge", "-q", "--no-edit", "origin/dev")
+        self.ws.commit(self.ws.api, "b.txt", "b\n", "B")
+        result = self.ws.repo_result("submit", "--source", "dev", "--title", "AB")
+        self.assertEqual(result["status"], "CREATED")
+        self.assertEqual(git(self.ws.remote, "log", "--format=%s", "dev..feature").splitlines(), ["B", "A"])
+        self.assertEqual(self.ws.merges(self.ws.remote, "dev..feature"), 0)
+
+    def test_branch_other_work_builds_on_gets_the_source_merged(self) -> None:
+        self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        pushed = self.ws.remote_sha("feature")
+        git(self.ws.api, "config", "branch.other.multiRepoSource", "feature")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
+        result = self.ws.repo_result("submit")
+        self.assertEqual((result["status"], result["merged_source"]), ("UPDATED", True))
+        self.assertNotIn("rewrote_remote", result)
+        git(self.ws.remote, "merge-base", "--is-ancestor", pushed, "feature")
 
     def test_conflict_is_reported_then_resumed_after_resolution(self) -> None:
         self.ws.commit(self.ws.api, "base.txt", "mine\n", "내 변경")
@@ -187,6 +220,19 @@ class SubmitTests(MultiRepoTestCase):
         resumed = self.ws.repo_result("submit")
         self.assertEqual(resumed["status"], "UPDATED")
         self.assertEqual(git(self.ws.remote, "show", "feature:base.txt"), "mine and theirs")
+        self.assertEqual(self.ws.merges(self.ws.remote, "dev..feature"), 0)
+        self.assertEqual(git(self.ws.remote, "log", "--format=%s", "dev..feature"), "내 변경")
+
+    def test_conflict_resolved_to_the_source_side_drops_the_commit(self) -> None:
+        self.ws.commit(self.ws.api, "base.txt", "mine\n", "내 변경")
+        self.ws.commit(self.ws.api, "b.txt", "b\n", "B")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        self.ws.advance("dev", "base.txt", "theirs\n", "상대 변경")
+        self.assertEqual(self.ws.repo_result("submit")["status"], "CONFLICT")
+        (self.ws.api / "base.txt").write_text("theirs\n", encoding="utf-8")  # keep only the source's change
+        git(self.ws.api, "add", "base.txt")
+        self.assertEqual(self.ws.repo_result("submit")["status"], "UPDATED")
+        self.assertEqual(git(self.ws.remote, "log", "--format=%s", "dev..feature"), "B")
 
     def test_after_squash_merge_next_submit_needs_only_new_work(self) -> None:
         self.ws.commit(self.ws.api, "a.txt", "a\n", "A 작업")
@@ -251,10 +297,26 @@ class SubmitTests(MultiRepoTestCase):
         self.ws.repo_result("submit", "--source", "dev", "--title", "A")
         teammate = self.ws.advance("feature", "t.txt", "t\n", "동료 작업")
         self.ws.commit(self.ws.api, "b.txt", "b\n", "B")
+        self.ws.advance("dev", "d.txt", "d\n", "D")
         result = self.ws.repo_result("submit")
-        self.assertEqual(result["status"], "UPDATED")
+        self.assertEqual((result["status"], result["merged_source"]), ("UPDATED", True))
         self.assertNotIn("replaced_stale_remote", result)
+        self.assertNotIn("rewrote_remote", result)
         git(self.ws.remote, "merge-base", "--is-ancestor", teammate, "feature")
+
+    def test_sync_then_submit_pushes_the_rebased_branch_with_a_lease(self) -> None:
+        self.ws.commit(self.ws.api, "base.txt", "mine\n", "내 변경")
+        self.ws.repo_result("submit", "--source", "dev", "--title", "A")
+        pushed = self.ws.remote_sha("feature")
+        self.ws.advance("dev", "base.txt", "theirs\n", "상대 변경")
+        self.assertEqual(self.ws.repo_result("sync")["status"], "CONFLICT")
+        (self.ws.api / "base.txt").write_text("both\n", encoding="utf-8")
+        git(self.ws.api, "add", "base.txt")
+        self.assertEqual(self.ws.repo_result("sync")["status"], "SYNCED")
+        head = git(self.ws.api, "rev-parse", "HEAD")
+        result = self.ws.repo_result("submit")
+        self.assertEqual((result["status"], result["rewrote_remote"]), ("UPDATED", pushed))
+        self.assertEqual(self.ws.remote_sha("feature"), head, "the resolved rebase is pushed as is")
 
     def test_protected_and_source_branches_are_refused(self) -> None:
         git(self.ws.api, "switch", "-q", "-c", "dev2-copy")
@@ -370,7 +432,7 @@ class SyncTests(MultiRepoTestCase):
         source = self.ws.advance("dev", "d.txt", "d\n", "D")
         result = self.ws.repo_result("sync")
         self.assertEqual((result["status"], result["unpushed"]), ("SYNCED", 2))
-        git(self.ws.api, "merge-base", "--is-ancestor", source, "HEAD")
+        self.assertEqual(git(self.ws.api, "rev-parse", "HEAD^"), source)
         self.assertEqual(self.ws.remote_sha("feature"), pushed)
         self.assertEqual(len(self.ws.prs()), 1)
         self.assertEqual(self.ws.repo_result("sync")["status"], "UP_TO_DATE")
@@ -392,7 +454,7 @@ class SyncTests(MultiRepoTestCase):
         git(self.ws.api, "add", "base.txt")
         self.assertEqual(self.ws.repo_result("sync")["status"], "SYNCED")
         self.assertEqual(git(self.ws.api, "status", "--porcelain"), "")
-        self.assertIn("상대 변경", git(self.ws.api, "log", "--format=%s"))
+        self.assertEqual(git(self.ws.api, "log", "-2", "--format=%s").splitlines(), ["내 변경", "상대 변경"])
 
     def squash_merge_pr(self) -> None:
         self.ws.commit(self.ws.api, "a.txt", "a\n", "A")
@@ -488,6 +550,12 @@ class PromoteTests(MultiRepoTestCase):
         self.ws.advance("dev", "d.txt", "d\n", "D")
         result = self.ws.repo_result("promote")
         self.assertEqual((result["status"], result["reason"]), ("SUBMIT_REQUIRED", "behind"))
+
+        self.ws.repo_result("submit")
+        plan = self.ws.run("promote", "--to", "dev")
+        self.assertEqual([(s["to"], s["action"]) for s in plan["repositories"][0]["steps"]], [("dev", "PUSH")])
+        self.ws.run("promote", "--to", "dev", "--execute", plan["plan_id"])
+        self.assertEqual(self.ws.merges(self.ws.remote, "dev"), 0, "rebased work fast-forwards dev without merges")
 
     def test_task_branch_without_new_work_starts_at_its_source(self) -> None:
         self.ws.advance("dev", "d.txt", "d\n", "D")
