@@ -1,6 +1,6 @@
 ---
 name: multi-repo
-description: "Use only when the user explicitly invokes `$common-skills:multi-repo` (Codex) or `/common-skills:multi-repo` (Claude Code). Submits task branches across a folder of independent Git repositories (commit, merge the latest source branch, push, create or update the PR), syncs task branches with the latest source locally (deleting merged remote branches), shows their status, and promotes branches through dev, dev2 and prod with fast-forward pushes."
+description: "Use only when the user explicitly invokes `$common-skills:multi-repo` (Codex) or `/common-skills:multi-repo` (Claude Code). Submits task branches across a folder of independent Git repositories (commit, rebase onto the latest source branch, push, create or update the PR), syncs task branches with the latest source locally (deleting merged remote branches), shows their status, and promotes branches through dev, dev2 and prod with fast-forward pushes."
 disable-model-invocation: true
 ---
 
@@ -45,8 +45,8 @@ Goal: every selected repository ends with its task branch pushed, containing the
 
    - `commit`: only when the repository is dirty. List exactly the task-related paths (for renames, both sides); only those are committed, whatever else is staged. Write the message in Korean following the repository's existing commit conventions. If changes look unrelated, secret, or generated, leave them out and ask the user.
    - `pr`: only when `needs_pr_text`. Korean title and body from `commits`, `diffstat` and the committed changes; follow the repository's PR template if any.
-   - An empty entry (`{}`) just merges the source, pushes, and updates the existing PR.
-3. **Execute**: `submit --plan <file> [--source <branch>]`. For each planned repository, concurrently: commit the planned paths, merge `origin/<branch>` and then `origin/<source>` (normal merge commits; never rebase), push without force, and create or update the PR.
+   - An empty entry (`{}`) just brings in the latest source, pushes, and updates the existing PR.
+3. **Execute**: `submit --plan <file> [--source <branch>]`. For each planned repository, concurrently: commit the planned paths, bring in the latest `origin/<source>` (see the rules below), push, and create or update the PR.
 4. Act on any repository not at `CREATED`, `UPDATED` or `NO_CHANGES`, then rerun `--repo <name> submit --plan <file>` for it. Rerunning a plan is safe: already committed paths and existing PRs are not duplicated.
 
 Without `--prepare`/`--plan`, `submit` runs step 3 with no commits for every repository; `--repo <name> submit --title "<title>" --body-file <file>` creates a single PR directly.
@@ -56,27 +56,33 @@ Without `--prepare`/`--plan`, `submit` runs step 3 with no commits for every rep
 | `SOURCE_REQUIRED` | No `--source`, remembered source, or PR base. | Ask the user which branch to merge from (`remote_branches` lists candidates); rerun with `--source <branch>`. It is remembered afterwards in `git config branch.<branch>.multiRepoSource`. |
 | `READY` | (`--prepare` only) Ready for a plan entry. | Write its entry as in step 2. |
 | `DIRTY` | Files outside the plan's `commit.paths` remain (`dirty`); nothing was merged or pushed. | Add them to the plan if they belong to the task, otherwise ask the user. Ignored files never count. |
-| `CONFLICT` | A merge stopped (`merging`, `conflicts`). | Resolve every listed file preserving both sides' intent (never take a whole side blindly, never drop tests), `git add` them, rerun step 4; it completes the merge commit. Ask the user only when the intents genuinely contradict. |
+| `CONFLICT` | A rebase or merge stopped (`rebasing` or `merging`, `conflicts`). | Resolve every listed file preserving both sides' intent (never take a whole side blindly, never drop tests), `git add` them, rerun step 4; it continues the rebase (which may stop again on a later commit) or completes the merge commit. During a rebase, "ours" is the source and "theirs" is your commit being replayed. Do not run `git rebase` yourself. Ask the user only when the intents genuinely contradict. |
 | `PR_TEXT_REQUIRED` | Pushed; no open PR and the plan had no `pr` text. | Add `pr` to its plan entry from `commits` and `diffstat`, rerun step 4. |
 | `CREATED` / `UPDATED` | PR opened / existing open PR updated by the push. | Done. Report `pr.url`; mention any `warning`. |
 | `NO_CHANGES` | Branch has no difference from the source (e.g. its PR was already squash-merged). | Done; nothing pushed. `moved_to_source` means the branch only held already-merged work, so it was restarted at the source tip instead of getting a merge commit. |
 | `PROTECTED_BRANCH` | Current branch is `main`, `master`, `dev`, `dev2`, `prod`, or equals the source. | Stop for this repository; tell the user to switch to a task branch. |
-| `PUSH_REJECTED` / `MERGE_FAILED` / `COMMAND_FAILED` / `DETACHED` / `GH_MISSING` / `SOURCE_NOT_FOUND` / `PLAN_INVALID` / `UNKNOWN_REPOSITORY` | Environment or remote problem (`error`). | Report the error; rerun once if the remote simply moved. If a commit hook rejected the merge commit (merge still in progress, no conflicts), commit it with `git commit -m "<message the hook accepts>"` and rerun. Never force-push. |
+| `PUSH_REJECTED` / `MERGE_FAILED` / `REBASE_FAILED` / `COMMAND_FAILED` / `DETACHED` / `GH_MISSING` / `SOURCE_NOT_FOUND` / `PLAN_INVALID` / `UNKNOWN_REPOSITORY` | Environment or remote problem (`error`). | Report the error; rerun once if the remote simply moved. If a commit hook rejected the merge commit (merge still in progress, no conflicts), commit it with `git commit -m "<message the hook accepts>"` and rerun. Never force-push. |
+
+How the source is brought in:
+
+- **Rebase** (normal case): when every commit the branch adds to the source was committed by this user (`git config user.email`) and no other branch or open PR uses the branch as its source, the branch is rebased onto `origin/<source>`. Its own commits sit on the source tip as a straight line, existing merge commits are dropped, and commits whose change is already in the source disappear. The remote branch is then replaced with `--force-with-lease` on the SHA it had when fetched (`rewrote_remote`), so a push made by anyone in the meantime is never overwritten (`PUSH_REJECTED`; rerun).
+- **Merge** (`merged_source`): a branch holding someone else's commits, or one other work builds on, gets `origin/<source>` merged instead, so nobody's commits are rewritten.
+- A remote branch with commits this checkout never had (a teammate's push) is merged in first, never replaced; that branch then counts as shared.
 
 After a PR is squash-merged on GitHub, keep working on the same branch and submit again. The runner recognises work already in the source: a branch holding nothing else restarts at the source tip, and the stale remote branch of the merged PR is replaced (`replaced_stale_remote`, with a lease on its exact SHA) so the next PR shows only new work. Commits a teammate pushed to the remote branch are merged, never replaced.
 
-The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches yourself; the runner's stale-branch replacement above and `sync`'s merged-branch deletion are the only exceptions.
+The user merges PRs on GitHub. Never merge a PR, enable auto-merge, force-push, reset, rebase, or delete branches yourself; the runner's lease pushes above and `sync`'s merged-branch deletion are the only exceptions.
 
 ## sync
 
-Brings every selected repository's checked-out task branch up to the latest source without committing, pushing or creating PRs: `sync [--source <branch>]`. It uses the same merge rules as submit (teammates' pushes, then the source; a branch holding only merged work restarts at the source tip). When a PR from the task branch was merged, everything on its remote branch is already in the source, no PR is open from it, and no other branch or open PR uses it as a source, that remote branch is deleted (`deleted_remote`, with a lease on its exact SHA). `main`, `master`, `dev`, `dev2` and `prod` are never deleted; otherwise `remote_kept` says why it stayed.
+Brings every selected repository's checked-out task branch up to the latest source without committing, pushing or creating PRs: `sync [--source <branch>]`. It uses the same rules as submit (teammates' pushes are merged, then the branch is rebased onto the source or the source is merged; a branch holding only merged work restarts at the source tip). The rebased branch is pushed by the next submit. When a PR from the task branch was merged, everything on its remote branch is already in the source, no PR is open from it, and no other branch or open PR uses it as a source, that remote branch is deleted (`deleted_remote`, with a lease on its exact SHA). `main`, `master`, `dev`, `dev2` and `prod` are never deleted; otherwise `remote_kept` says why it stayed.
 
 | status | meaning | next step |
 |---|---|---|
 | `SYNCED` | The branch now contains the latest source (`unpushed` counts local commits not on the remote). | Done. |
 | `UP_TO_DATE` | Nothing to bring in. | Done. |
 | `DIRTY` | Uncommitted changes (`dirty`); the repository was skipped untouched. | Report it; do not commit or stash for the user. |
-| `CONFLICT` | Same as submit. | Resolve, `git add`, rerun `--repo <name> sync`; it completes the merge commit. |
+| `CONFLICT` | Same as submit. | Resolve, `git add`, rerun `--repo <name> sync`; it continues the rebase or completes the merge commit. |
 
 `SOURCE_REQUIRED`, `PROTECTED_BRANCH` and the error statuses mean the same as for submit.
 
@@ -110,7 +116,8 @@ multi-repo: 폴더 안의 Git 저장소들을 한 번에 다룹니다.
   status   저장소별 브랜치, source 대비 앞섬/뒤처짐, 미푸시 커밋, PR 상태
   sync     지금 브랜치에 최신 source 받아오기(커밋·push·PR 없음, 미커밋 변경 있으면 건너뜀)
            + 머지 끝난 원격 작업 브랜치 삭제
-  submit   커밋 → 최신 source merge(충돌은 해결) → push → PR 생성/갱신
+  submit   커밋 → 최신 source 위로 rebase(충돌은 해결) → push → PR 생성/갱신
+           (동료 커밋이 있거나 다른 브랜치의 source인 브랜치는 rebase 대신 merge)
   promote  작업 브랜치(또는 --from 브랜치)를 → dev → dev2 → prod 순서로 fast-forward 승격
            (--to dev 로 dev까지만, PR 없이 dev에 바로 올릴 때도 사용)
 
