@@ -32,15 +32,26 @@ python3 "<skill-dir>/../../scripts/task.py" <명령> ...
 
 ## .task.toml
 
-```toml
-worktrees = "worktrees"               # 작업 폴더를 둘 곳
-branch_prefix = "dev-feature-"        # 브랜치 = 접두어 + 작업 이름
-default_base = "dev"                  # 기준 브랜치(PR 대상)
-reserved = ["main", "slot-*"]         # 작업 이름으로 못 쓰는 이름(* 는 패턴)
-run_hint = "./ctl.sh -w {task} start <서비스...>"   # new 뒤에 보여 줄 실행 안내(선택)
+프로젝트 루트에 둔다. 아래는 형식 예시이고, 키를 빼면 기본값을 쓴다.
 
-[bases]                               # 레포별 기준 브랜치가 다를 때
-alarm_api = "dev-feature-food"
+```toml
+worktrees = "worktrees"
+branch_prefix = "feature-"
+default_base = "dev"
+reserved = ["main", "tmp-*"]
+run_hint = "make run TASK={task}"
+
+[bases]
+legacy-api = "release"
 ```
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `worktrees` | `"worktrees"` | 작업 폴더를 둘 곳(루트 기준) |
+| `branch_prefix` | `"feature-"` | 브랜치 이름 = 접두어 + 작업 이름 |
+| `default_base` | `"dev"` | 기준 브랜치(PR 대상) |
+| `reserved` | `["main"]` | 작업 이름으로 못 쓰는 이름. `*` 패턴 가능 |
+| `run_hint` | 없음 | `new` 뒤에 보여 줄 실행 안내. `{task}` 는 작업 이름 |
+| `[bases]` | 비어 있음 | 레포 폴더 이름 = 그 레포만의 기준 브랜치 |
 
 필요: Python 3.11+, `git`, 인증된 `gh`.
