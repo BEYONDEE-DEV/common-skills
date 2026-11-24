@@ -10,13 +10,14 @@
 ## 흐름
 
 ```text
-/common-skills:task  api, web 으로 login-device 작업 만들어줘                   # new
+/common-skills:task  api, web 으로 login-device 작업 만들어줘 (이슈 PROJ-123)    # new --issue
 /common-skills:task  login-device 상태                                         # status
 /common-skills:pr    login-device PR 올려줘                                     # pr --prepare → 본문 → pr
 (사람이 GitHub 에서 Rebase and merge)
 /common-skills:task  login-device 정리해줘                                      # done
 ```
 
+- `.task.toml` 에 `[issue]` 가 있으면 작업을 만들 때 이슈를 묻고(건너뛸 수 있음), PR 본문 맨 위 링크·PR 제목·커밋 첫 줄에 이슈 ID 를 붙입니다.
 - 첫 PR 은 작업 브랜치 커밋을 하나로 합쳐 올리고, PR 이 생긴 뒤의 수정은 새 커밋으로 그대로 올립니다.
 - PR 본문의 파일 표는 git diff 에서 만들고, 빠진 파일이나 `TODO` 가 남으면 어떤 레포도 올리지 않습니다.
 - 충돌 때문에 직접 rebase 했을 때만 `--rebased` 로 `--force-with-lease` push 합니다.

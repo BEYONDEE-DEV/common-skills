@@ -24,6 +24,9 @@ reserved=["main"], run_hint 없음, [bases] 비어 있음):
     run_hint = "make run TASK={task}"
     [bases]
     legacy-api = "release"
+    [issue]                               # 있으면 new 때 이슈를 묻고 PR 본문 맨 위에 링크를 붙인다
+    url = "https://example.youtrack.cloud/issue/{id}"
+    pattern = "PROJ-[0-9]+"
 """
 from __future__ import annotations
 
@@ -58,6 +61,9 @@ class Config:
         self.bases = dict(data.get("bases", {}))
         self.reserved = list(data.get("reserved", ["main"]))
         self.run_hint = data.get("run_hint", "")
+        issue = data.get("issue", {})
+        self.issue_url = issue.get("url", "")          # 예: https://example.youtrack.cloud/issue/{id}
+        self.issue_pattern = issue.get("pattern", "")  # 예: PROJ-[0-9]+
 
 
 CFG: Config  # main() 에서 채운다
@@ -156,6 +162,83 @@ def herdr_ws_by_label(label: str) -> str:
 
 # ---------- new / list ----------
 
+META_NAME = ".task.json"
+
+
+def load_meta(tdir: Path) -> dict | None:
+    f = tdir / META_NAME
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+
+def save_meta(tdir: Path, meta: dict) -> None:
+    (tdir / META_NAME).write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def resolve_issues(a: argparse.Namespace, meta: dict | None) -> dict:
+    """작업에 연결할 이슈를 정한다. 처음 만드는 작업이면 --issue 나 --no-issue 중 하나가 있어야 한다
+    (터미널에서 사람이 실행하면 물어본다). [issue] 설정이 없는 프로젝트는 묻지 않는다."""
+    meta = meta or {"issues": [], "issue_skipped": False}
+    new = [i.strip() for i in (a.issue or []) if i.strip()]
+    if not new and not a.no_issue and not (meta["issues"] or meta["issue_skipped"]) and CFG.issue_url:
+        if sys.stdin.isatty():
+            new = input("이 작업의 이슈 ID (여러 개는 공백으로, 없으면 엔터로 건너뜀): ").split()
+        else:
+            raise Fail("이 작업에 연결할 이슈를 사용자에게 물어 --issue <ID> 로 주세요. 사용자가 건너뛰자고 하면 --no-issue")
+        if not new:
+            a.no_issue = True
+    for i in new:
+        if CFG.issue_pattern and not re.fullmatch(CFG.issue_pattern, i):
+            raise Fail(f"이슈 ID 형식이 아닙니다: '{i}' ({CONFIG_NAME} [issue] pattern = {CFG.issue_pattern})")
+        if i not in meta["issues"]:
+            meta["issues"].append(i)
+    meta["issue_skipped"] = not meta["issues"] and (a.no_issue or meta["issue_skipped"])
+    return meta
+
+
+def with_issue_ids(subject: str, ids: list[str]) -> str:
+    """제목(커밋 첫 줄·PR 제목)에 이슈 ID 가 하나도 없으면 끝에 ' (ID, ID)' 를 붙인다."""
+    if not ids or any(i in subject for i in ids):
+        return subject
+    return f"{subject} ({', '.join(ids)})"
+
+
+def tag_head_commit() -> int:
+    """git rebase --exec 에서 커밋마다 불린다: 첫 줄에 이슈 ID 가 없으면 붙여 고쳐 쓴다."""
+    ids = [i for i in os.environ.get("TASK_ISSUE_IDS", "").split(",") if i]
+    message = subprocess.run(["git", "log", "-1", "--format=%B"], text=True, capture_output=True, check=True).stdout
+    subject, _, rest = message.partition("\n")
+    tagged = with_issue_ids(subject, ids)
+    if tagged != subject:
+        subprocess.run(["git", "commit", "--quiet", "--amend", "-F", "-"], input=tagged + "\n" + rest, text=True, check=True)
+    return 0
+
+
+def tag_unpushed_commits(c: dict, ids: list[str]) -> int:
+    """아직 push 하지 않은 커밋 가운데 이슈 ID 가 없는 커밋의 첫 줄에 ID 를 붙인다(원격 기록은 바꾸지 않음)."""
+    r = c["repo"]
+    since = c["remote"] if c["remote"] and git_ok(r, "merge-base", "--is-ancestor", c["remote"], "HEAD") else \
+        git(r, "merge-base", "HEAD", f"origin/{c['base']}")
+    subjects = git(r, "log", "--format=%s", f"{since}..HEAD").splitlines()
+    missing = [x for x in subjects if not any(i in x for i in ids)]
+    if not ids or not missing:
+        return 0
+    env = {**os.environ, "TASK_ISSUE_IDS": ",".join(ids)}
+    exec_cmd = f"{sys.executable} {Path(__file__).resolve()} _tag-head"
+    proc = subprocess.run(["git", "-C", str(r), "rebase", "--quiet", "--exec", exec_cmd, since], env=env, text=True, capture_output=True)
+    if proc.returncode != 0:
+        run(["git", "-C", str(r), "rebase", "--abort"], check=False)
+        raise Fail(f"{c['name']}: 커밋 메시지에 이슈 ID 를 붙이지 못했습니다\n{(proc.stderr or proc.stdout).strip()}")
+    return len(missing)
+
+
+def issue_lines(meta: dict | None) -> list[str]:
+    if not meta or not (meta["issues"] or meta["issue_skipped"] or CFG.issue_url):
+        return []
+    if not meta["issues"]:
+        return ["- 없음 (작업을 만들 때 건너뜀)"]
+    return [f"- [{i}]({CFG.issue_url.format(id=i)})" if CFG.issue_url else f"- {i}" for i in meta["issues"]]
+
+
 def cmd_new(a: argparse.Namespace) -> None:
     tdir = task_dir(a.task, must_exist=False)
     repos = a.repos
@@ -163,7 +246,12 @@ def cmd_new(a: argparse.Namespace) -> None:
         if "/" in r or not (CFG.root / r / ".git").exists():
             raise Fail(f"레포가 아닙니다: '{r}' ({CFG.root} 아래 레포 폴더 이름을 쓰세요)")
     branch = a.branch or f"{CFG.branch_prefix}{a.task}"
+    meta = resolve_issues(a, load_meta(tdir) if tdir.is_dir() else None)
     tdir.mkdir(parents=True, exist_ok=True)
+    save_meta(tdir, meta)
+    lines = issue_lines(meta)
+    if lines:
+        info("· 이슈: " + ", ".join(meta["issues"]) if meta["issues"] else "· 이슈: 없음(건너뜀)")
 
     for r in repos:
         path, main = tdir / r, CFG.root / r
@@ -195,7 +283,9 @@ def cmd_list(a: argparse.Namespace) -> None:
     dirs = sorted(p for p in CFG.wt_dir.iterdir() if p.is_dir()) if CFG.wt_dir.is_dir() else []
     for d in (p for p in dirs if not any(fnmatch.fnmatchcase(p.name, pat) for pat in CFG.reserved)):
         found = True
-        info(d.name)
+        meta = load_meta(d)
+        issues = ", ".join(meta["issues"]) if meta and meta["issues"] else ""
+        info(d.name + (f"  [{issues}]" if issues else ""))
         for r in task_repos(d):
             branch = git(r, "rev-parse", "--abbrev-ref", "HEAD", check=False) or "?"
             dirty = len(git(r, "status", "--porcelain").splitlines())
@@ -302,9 +392,11 @@ def validate_body(text: str, files: list[tuple[str, str]]) -> list[str]:
     return errors
 
 
-def with_generated(text: str, commits: list[str], related: list[str]) -> str:
+def with_generated(text: str, commits: list[str], related: list[str], issues: list[str]) -> str:
     title, sections = parse_sections(text)
-    sections = [(n, l) for n, l in sections if n not in ("커밋", "관련 PR")]
+    sections = [(n, l) for n, l in sections if n not in ("이슈", "커밋", "관련 PR")]
+    if issues:
+        sections.insert(0, ("이슈", issues))
     idx = next((i for i, (n, _) in enumerate(sections) if n == FILES_SECTION), len(sections))
     sections.insert(idx, ("커밋", [f"- {c}" for c in commits]))
     if related:
@@ -342,6 +434,9 @@ def body_state(ctx: dict, files: list[tuple[str, str]]) -> str:
 
 def cmd_status(a: argparse.Namespace) -> None:
     tdir = task_dir(a.task)
+    lines = issue_lines(load_meta(tdir))
+    if lines:
+        info("이슈: " + " ".join(l[2:] for l in lines))
     for r in task_repos(tdir):
         c = repo_ctx(r, tdir)
         pr = c["open_pr"] or (c["prs"][0] if c["prs"] else None)
@@ -429,16 +524,23 @@ def cmd_pr(a: argparse.Namespace) -> None:
         raise Fail("PR 본문을 고쳐야 합니다:\n  " + "\n  ".join(problems))
 
     # 2단계: 커밋 정리 → push → PR 생성/갱신
+    meta = load_meta(tdir)
+    issues = issue_lines(meta)
+    ids = meta["issues"] if meta else []
     for c in ctxs:
         text = c["body"].read_text(encoding="utf-8")
         title, _ = parse_sections(text)
+        title = with_issue_ids(title, ids)
         r = c["repo"]
         if not c["open_pr"] and not c["remote"]:
             squash(c, title, text)
+        tagged = tag_unpushed_commits(c, ids)
+        if tagged:
+            info(f"· {c['name']}: 커밋 {tagged}개 첫 줄에 이슈 ID 를 붙임")
         how = push(c, a.rebased)
         mb = git(r, "merge-base", "HEAD", f"origin/{c['base']}")
         commits = git(r, "log", "--reverse", "--format=%s", f"{mb}..HEAD").splitlines()
-        c["final"] = with_generated(text, commits, [])
+        c["final"] = with_generated(text, commits, [], issues)
         body_only = c["final"].split("\n", 1)[1].lstrip("\n")
         if c["open_pr"]:
             run(["gh", "pr", "edit", str(c["open_pr"]["number"]), "--title", title, "--body-file", "-"], cwd=r, input=body_only)
@@ -468,7 +570,7 @@ def cmd_pr(a: argparse.Namespace) -> None:
             title, _ = parse_sections(c["final"])
             mb = git(c["repo"], "merge-base", "HEAD", f"origin/{c['base']}")
             commits = git(c["repo"], "log", "--reverse", "--format=%s", f"{mb}..HEAD").splitlines()
-            final = with_generated(c["body"].read_text(encoding="utf-8"), commits, related)
+            final = with_generated(c["body"].read_text(encoding="utf-8"), commits, related, issues)
             run(["gh", "pr", "edit", c["url"], "--body-file", "-"], cwd=c["repo"], input=final.split("\n", 1)[1].lstrip("\n"))
         info(f"· 관련 PR 링크를 {len(ctxs)}개 PR 에 넣음")
 
@@ -516,7 +618,7 @@ def cmd_done(a: argparse.Namespace) -> None:
 
 USAGE = """\
 (프로젝트 루트의 task.sh 또는 python3 <common-skills>/scripts/task.py 로 실행. 설정은 루트의 .task.toml)
-./task.sh new    <작업> <레포...> [--base <브랜치>] [--branch <브랜치>]
+./task.sh new    <작업> <레포...> [--issue <ID>...|--no-issue] [--base <브랜치>] [--branch <브랜치>]
 ./task.sh list
 ./task.sh status <작업>
 ./task.sh pr     <작업> --prepare [--repo <레포>...]   본문 틀 만들기/파일 표 갱신
@@ -524,7 +626,7 @@ USAGE = """\
 ./task.sh done   <작업> [--force]
 
 예:
-  ./task.sh new login-device api web
+  ./task.sh new login-device api web --issue PROJ-123
   ./task.sh pr login-device --prepare   # 본문 TODO 채우기
   ./task.sh pr login-device
   ./task.sh done login-device
@@ -535,12 +637,15 @@ def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="task.sh", usage=USAGE, add_help=True)
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("new"); s.add_argument("task"); s.add_argument("repos", nargs="+")
+    s.add_argument("--issue", action="append"); s.add_argument("--no-issue", action="store_true")
     s.add_argument("--base"); s.add_argument("--branch"); s.set_defaults(fn=cmd_new)
     s = sub.add_parser("list"); s.set_defaults(fn=cmd_list)
     s = sub.add_parser("status"); s.add_argument("task"); s.set_defaults(fn=cmd_status)
     s = sub.add_parser("pr"); s.add_argument("task"); s.add_argument("--prepare", action="store_true")
     s.add_argument("--repo", action="append"); s.add_argument("--rebased", action="store_true"); s.set_defaults(fn=cmd_pr)
     s = sub.add_parser("done"); s.add_argument("task"); s.add_argument("--force", action="store_true"); s.set_defaults(fn=cmd_done)
+    if argv[:1] == ["_tag-head"]:  # tag_unpushed_commits 의 rebase --exec 전용
+        return tag_head_commit()
     a = p.parse_args(argv)
     global CFG
     if not getattr(a, "fn", None):
