@@ -10,11 +10,11 @@
 ## 흐름
 
 ```text
-/common-skills:task  order_api, admin_api 로 sales-owner-contract 작업 만들어줘   # new
-/common-skills:task  sales-owner-contract 상태                                   # status
-/common-skills:pr    sales-owner-contract PR 올려줘                               # pr --prepare → 본문 → pr
+/common-skills:task  api, web 으로 login-device 작업 만들어줘                   # new
+/common-skills:task  login-device 상태                                         # status
+/common-skills:pr    login-device PR 올려줘                                     # pr --prepare → 본문 → pr
 (사람이 GitHub 에서 Rebase and merge)
-/common-skills:task  sales-owner-contract 정리해줘                                # done
+/common-skills:task  login-device 정리해줘                                      # done
 ```
 
 - 첫 PR 은 작업 브랜치 커밋을 하나로 합쳐 올리고, PR 이 생긴 뒤의 수정은 새 커밋으로 그대로 올립니다.

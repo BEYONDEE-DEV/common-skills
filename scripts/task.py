@@ -524,10 +524,10 @@ USAGE = """\
 ./task.sh done   <작업> [--force]
 
 예:
-  ./task.sh new sales-owner-contract order_api majung_admin_api
-  ./task.sh pr sales-owner-contract --prepare   # 본문 TODO 채우기
-  ./task.sh pr sales-owner-contract
-  ./task.sh done sales-owner-contract
+  ./task.sh new login-device api web
+  ./task.sh pr login-device --prepare   # 본문 TODO 채우기
+  ./task.sh pr login-device
+  ./task.sh done login-device
 """
 
 
