@@ -15,14 +15,15 @@
 - done 은 잃을 커밋이 없을 때만 지운다: 미커밋 변경이 없고, (원격에 없는 커밋이 없거나 || 머지된 PR 이 있거나).
 - herdr 안에서 실행하면 작업 이름으로 워크스페이스를 만들고(cwd 는 프로젝트 루트) done 때 닫는다.
 
-.task.toml 예:
+.task.toml 예 (키를 빼면 기본값: worktrees="worktrees", branch_prefix="feature-", default_base="dev",
+reserved=["main"], run_hint 없음, [bases] 비어 있음):
     worktrees = "worktrees"
-    branch_prefix = "dev-feature-"
+    branch_prefix = "feature-"
     default_base = "dev"
-    reserved = ["main", "slot-*"]          # 작업 이름으로 못 쓰는 이름(끝의 * 는 접두어)
-    run_hint = "./ctl.sh -w {task} start <서비스...>"
+    reserved = ["main", "tmp-*"]          # 작업 이름으로 못 쓰는 이름(* 패턴)
+    run_hint = "make run TASK={task}"
     [bases]
-    alarm_api = "dev-feature-food"
+    legacy-api = "release"
 """
 from __future__ import annotations
 
