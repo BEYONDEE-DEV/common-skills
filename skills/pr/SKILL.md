@@ -15,7 +15,7 @@ description: task 스킬로 만든 작업의 PR 을 올리거나 갱신할 때(P
 
 1. **커밋**: 작업 폴더(`<worktrees>/<작업>/<레포>`)에서 작업에 속한 파일만 커밋한다. 미커밋 변경이 있으면 `task.py pr` 이 멈춘다.
    - 메시지는 레포의 기존 형식(`feat:`·`fix:`·`refactor:` + 한국어)으로, 무엇이 바뀌는지 쓴다.
-   - PR 을 올린 뒤의 수정도 "리뷰 반영" 이 아니라 `fix: 환불 사유 빈 값 거절` 처럼 무엇을 고쳤는지 쓴다. rebase merge 라 이 커밋이 dev 에 그대로 남는다.
+   - PR 을 올린 뒤의 수정도 "리뷰 반영" 이 아니라 `fix: 로그인 기기 정보 빈 값 거절` 처럼 무엇을 고쳤는지 쓴다. rebase merge 라 이 커밋이 기준 브랜치에 그대로 남는다.
 2. **틀 만들기**: `task.py pr <작업> --prepare` → 레포마다 `<worktrees>/<작업>/.pr/<레포>.md` 가 생기거나 파일 표가 지금 diff 로 갱신된다(이미 쓴 설명은 남는다).
 3. **본문 채우기**: 출력된 커밋 목록과 `git -C <레포> diff origin/<기준>...HEAD` 를 **직접 읽고** 모든 `TODO` 를 채운다. 기억으로 쓰지 않는다.
 4. **올리기**: `task.py pr <작업>`. 스크립트가 검사(필수 칸·TODO·파일 누락) → 첫 PR 이면 커밋을 하나로 합침 → push → PR 생성/갱신 → 같은 작업의 다른 레포 PR 링크까지 한다. 검사에 걸리면 아무 레포도 올라가지 않으니 고치고 다시 실행한다.
@@ -32,13 +32,13 @@ description: task 스킬로 만든 작업의 PR 을 올리거나 갱신할 때(P
   ````markdown
   ```mermaid
   sequenceDiagram
-    client-api->>events-api: 환불 요청 (reason 추가)
-    events-api->>order-api: POST /refunds  ★변경
-    order-api-->>events-api: 환불 시작 콜백
+    web->>api: 로그인 요청 (deviceId 추가)
+    api->>auth: POST /sessions  ★변경
+    auth-->>api: 세션 토큰
   ```
   | 구간 | 기존 | 변경 |
   |---|---|---|
-  | events → order | reason 없음 | reason 필수, refund_request.reason 에 저장 |
+  | api → auth | deviceId 없음 | deviceId 필수, sessions.device_id 에 저장 |
   ````
 - **파일별 변경**: 표의 파일 목록과 `+/-` 는 스크립트가 git 에서 채운다. 행마다 `무엇을 · 왜` 를 한 줄로 쓰고, 끝에 `— 요청` 또는 `— 요청 밖` 을 붙인다. 이유를 댈 수 없는 파일이 있으면 본문에 숨기지 말고 사용자에게 먼저 묻는다.
 - **확인**: `함:` 실제로 실행한 명령·테스트와 결과, `못 함:` 확인하지 못한 것. 추측을 확인한 것처럼 쓰지 않는다.
