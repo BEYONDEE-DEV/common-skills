@@ -8,8 +8,8 @@
   "repository": "https://github.com/BEYONDEE-DEV/common-skills",
   "keywords": [
     "git",
+    "worktree",
     "pull-request",
-    "merge",
-    "release"
+    "multi-repo-task"
   ]
 }

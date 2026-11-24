@@ -13,7 +13,14 @@ BEYONDEE Skills is a shared agent-skill plugin that works in both **Codex** and 
 
 ## Included Skills
 
-None at the moment. The multi-repo skill was removed in 0.4.0.
+| Skill | Codex | Claude Code | 하는 일 |
+|---|---|---|---|
+| Task | `$common-skills:task` | `/common-skills:task` | 작업마다 여러 레포 worktree 폴더 만들기·상태·머지 후 정리 |
+| PR | `$common-skills:pr` | `/common-skills:pr` | 사람이 읽을 PR 본문을 diff 와 대조해 검사하고 PR 생성·갱신 |
+
+Both skills run `scripts/task.py`, which reads the project rules from `.task.toml` at the project root. See [USAGE.ko.md](./USAGE.ko.md).
+
+Requirements: Python 3.11+, `git`, and an authenticated `gh` CLI.
 
 ## Install in Codex
 

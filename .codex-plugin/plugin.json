@@ -8,10 +8,17 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "BEYONDEE Skills",
-    "shortDescription": "BEYONDEE shared agent skills.",
-    "longDescription": "BEYONDEE Skills bundles shared agent skills for Codex and Claude Code. No skills are included at the moment.",
+    "shortDescription": "Task worktrees across repositories and human-readable PRs.",
+    "longDescription": "BEYONDEE Skills bundles shared agent skills for Codex and Claude Code. task creates a worktree folder per task across several repositories (one branch name, per-repository base from .task.toml), reports status and cleans up after merge; pr writes a PR body a human can review (request, out-of-scope changes, risky spots, data flow, every changed file, what was verified), checks it against the diff, squashes the first PR, pushes and creates or updates the PRs with links between them.",
     "developerName": "BEYONDEE",
     "category": "Productivity",
-    "capabilities": []
+    "capabilities": [
+      "Task Worktrees",
+      "Pull Requests"
+    ],
+    "defaultPrompt": [
+      "Use $common-skills:task to start a task across the repositories I need.",
+      "Use $common-skills:pr to open the PRs for this task."
+    ]
   }
 }
