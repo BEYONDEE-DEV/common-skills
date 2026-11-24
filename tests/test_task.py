@@ -48,6 +48,9 @@ CONFIG = textwrap.dedent('''\
     reserved = ["main", "slot-*"]
     [bases]
     other = "dev-feature-food"
+    [issue]
+    url = "https://example.youtrack.cloud/issue/{id}"
+    pattern = "PROJ-[0-9]+"
 ''')
 
 
@@ -107,7 +110,7 @@ class TaskTests(unittest.TestCase):
 
     def task(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=cwd or self.root, env=self.env,
-                              text=True, capture_output=True)
+                              text=True, capture_output=True, stdin=subprocess.DEVNULL)
 
     def commit(self, repo: Path, name: str, message: str) -> None:
         (repo / name).write_text(name + "\n")
@@ -118,7 +121,7 @@ class TaskTests(unittest.TestCase):
         return json.loads((self.tmp / "gh.json").read_text())["prs"]
 
     def test_new_uses_per_repo_base_and_no_upstream(self) -> None:
-        out = self.task("new", "t1", "api", "other")
+        out = self.task("new", "t1", "api", "other", "--no-issue")
         self.assertEqual(out.returncode, 0, out.stderr)
         api, other = self.root / "worktrees/t1/api", self.root / "worktrees/t1/other"
         self.assertEqual(self.sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=api), "dev-feature-t1")
@@ -127,12 +130,23 @@ class TaskTests(unittest.TestCase):
         self.assertNotEqual(upstream.returncode, 0)
 
     def test_reserved_names_and_missing_config(self) -> None:
-        self.assertIn("reserved", self.task("new", "slot-9", "api").stderr)
+        self.assertIn("reserved", self.task("new", "slot-9", "api", "--no-issue").stderr)
         (self.root / ".task.toml").unlink()
         self.assertIn(".task.toml", self.task("list").stderr)
 
+    def test_issue_required_validated_and_skippable(self) -> None:
+        out = self.task("new", "t1", "api")
+        self.assertIn("--no-issue", out.stderr, "이슈를 안 주면 사용자에게 물으라고 멈춘다")
+        self.assertFalse((self.root / "worktrees/t1").exists())
+        self.assertIn("형식이 아닙니다", self.task("new", "t1", "api", "--issue", "XYZ-1").stderr)
+        self.assertEqual(self.task("new", "t2", "api", "--no-issue").returncode, 0)
+        self.assertEqual(self.task("new", "t2", "other").returncode, 0, "이미 정한 작업에 레포를 더할 때는 다시 묻지 않는다")
+        self.assertEqual(self.task("new", "t3", "api", "--issue", "PROJ-1").returncode, 0)
+        self.task("new", "t3", "api", "--issue", "PROJ-2")
+        self.assertIn("t3  [PROJ-1, PROJ-2]", self.task("list").stdout)
+
     def test_pr_flow(self) -> None:
-        self.task("new", "t1", "api", "other")
+        self.task("new", "t1", "api", "other", "--issue", "PROJ-7")
         api, other = self.root / "worktrees/t1/api", self.root / "worktrees/t1/other"
         self.commit(api, "a.txt", "wip a")
         self.commit(api, "b.txt", "wip b")
@@ -153,9 +167,12 @@ class TaskTests(unittest.TestCase):
         (pr_dir / "api.md").write_text(body("A 추가", [("a.txt", "+1 −0"), ("b.txt", "+1 −0")]))
         out = self.task("pr", "t1")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.sh("git", "log", "--format=%s", "origin/dev..HEAD", cwd=api), "A 추가", "첫 PR 은 커밋을 합친다")
+        self.assertEqual(self.sh("git", "log", "--format=%s", "origin/dev..HEAD", cwd=api), "A 추가 (PROJ-7)",
+                         "첫 PR 은 커밋을 합치고 제목에 이슈 ID 를 붙인다")
         pr = next(p for p in self.prs() if p["repo"] == "api")
         self.assertEqual(pr["base"], "dev")
+        self.assertEqual(pr["title"], "A 추가 (PROJ-7)")
+        self.assertTrue(pr["body"].startswith("## 이슈\n- [PROJ-7](https://example.youtrack.cloud/issue/PROJ-7)"), pr["body"][:80])
         self.assertIn("## 커밋\n- A 추가", pr["body"])
         self.assertIn("other: https://github.com/fake/other/pull/", pr["body"])
         self.assertEqual(next(p for p in self.prs() if p["repo"] == "other")["base"], "dev-feature-food")
@@ -168,7 +185,8 @@ class TaskTests(unittest.TestCase):
         (pr_dir / "api.md").write_text(text.replace("| `d.txt` | +1 −0 | TODO |", "| `d.txt` | +1 −0 | d — 요청 |"))
         out = self.task("pr", "t1", "--repo", "api")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.sh("git", "log", "--format=%s", "origin/dev..HEAD", cwd=api), "fix: d 보완\nA 추가")
+        self.assertEqual(self.sh("git", "log", "--format=%s", "origin/dev..HEAD", cwd=api), "fix: d 보완 (PROJ-7)\nA 추가 (PROJ-7)",
+                         "PR 뒤 커밋도 push 전에 이슈 ID 를 붙인다")
         self.assertEqual(len(self.prs()), 2, "PR 을 새로 만들지 않는다")
 
         # 원격과 갈라지면 --rebased 없이는 멈춘다
@@ -179,8 +197,20 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.sh("git", "ls-remote", "origin", "dev-feature-t1", cwd=api).split()[0],
                          self.sh("git", "rev-parse", "HEAD", cwd=api))
 
+    def test_skipped_issue_shows_none(self) -> None:
+        self.task("new", "t1", "api", "--no-issue")
+        api = self.root / "worktrees/t1/api"
+        self.commit(api, "a.txt", "add a")
+        self.task("pr", "t1", "--prepare")
+        (self.root / "worktrees/t1/.pr/api.md").write_text(body("A 추가", [("a.txt", "+1 −0")]))
+        out = self.task("pr", "t1")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        pr = self.prs()[0]
+        self.assertEqual(pr["title"], "A 추가")
+        self.assertTrue(pr["body"].startswith("## 이슈\n- 없음"), pr["body"][:60])
+
     def test_done_refuses_unpushed_then_cleans(self) -> None:
-        self.task("new", "t1", "api")
+        self.task("new", "t1", "api", "--no-issue")
         api = self.root / "worktrees/t1/api"
         self.commit(api, "a.txt", "local only")
         self.assertIn("머지된 PR 없음", self.task("done", "t1").stderr)
