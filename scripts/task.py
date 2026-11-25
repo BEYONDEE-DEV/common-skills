@@ -13,7 +13,8 @@
 - PR 본문은 <worktrees>/<작업>/.pr/<레포>.md 에 쓴다(형식은 pr 스킬). 파일별 변경 표의 파일 목록은 git diff 에서 뽑고,
   빠진 파일·TODO 가 남으면 어떤 레포도 올리지 않는다. 커밋 목록과 관련 PR 링크는 스크립트가 붙인다.
 - done 은 잃을 커밋이 없을 때만 지운다: 미커밋 변경이 없고, (원격에 없는 커밋이 없거나 || 머지된 PR 이 있거나).
-- herdr 안에서 실행하면 작업 이름으로 워크스페이스를 만들고(cwd 는 프로젝트 루트) done 때 닫는다.
+- herdr 안에서 실행하면 작업 워크스페이스를 만들고(이름은 [herdr] label, cwd 는 프로젝트 루트) done 때 닫는다.
+  [herdr] orchestrator 가 있으면 새 작업은 그 이름의 워크스페이스에서만 만든다(작업 탭 에이전트가 작업을 늘리지 않게).
 
 .task.toml 예 (키를 빼면 기본값: worktrees="worktrees", branch_prefix="feature-", default_base="dev",
 reserved=["main"], run_hint 없음, [bases] 비어 있음):
@@ -27,6 +28,9 @@ reserved=["main"], run_hint 없음, [bases] 비어 있음):
     [issue]                               # 있으면 new 때 이슈를 묻고 PR 본문 맨 위에 링크를 붙인다
     url = "https://example.youtrack.cloud/issue/{id}"
     pattern = "PROJ-[0-9]+"
+    [herdr]                               # herdr 안에서 실행할 때만 쓴다
+    orchestrator = "my-project"           # 새 작업을 만들 수 있는 워크스페이스 이름(없으면 어디서나)
+    label = "└ {task}"                    # 작업 워크스페이스 이름(기본 "{task}")
 """
 from __future__ import annotations
 
@@ -64,6 +68,9 @@ class Config:
         issue = data.get("issue", {})
         self.issue_url = issue.get("url", "")          # 예: https://example.youtrack.cloud/issue/{id}
         self.issue_pattern = issue.get("pattern", "")  # 예: PROJ-[0-9]+
+        herdr = data.get("herdr", {})
+        self.herdr_orchestrator = herdr.get("orchestrator", "")  # 새 작업을 만들 수 있는 워크스페이스 이름
+        self.herdr_label = herdr.get("label", "{task}")          # 작업 워크스페이스 이름
 
 
 CFG: Config  # main() 에서 채운다
@@ -147,17 +154,36 @@ def in_herdr() -> bool:
     return os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr") is not None
 
 
-def herdr_ws_by_label(label: str) -> str:
+def herdr_workspaces() -> list[dict]:
     if not in_herdr():
-        return ""
+        return []
     proc = run(["herdr", "workspace", "list"], check=False)
     try:
-        for w in json.loads(proc.stdout)["result"]["workspaces"]:
-            if w.get("label") == label:
-                return w["workspace_id"]
-    except (ValueError, KeyError):
-        pass
-    return ""
+        return list(json.loads(proc.stdout)["result"]["workspaces"])
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+def herdr_task_label(task: str) -> str:
+    return CFG.herdr_label.format(task=task)
+
+
+def herdr_task_ws(task: str) -> str:
+    """작업 워크스페이스 id. label 설정 전에 만든 워크스페이스(이름 = 작업 이름)도 찾는다."""
+    by_label = {w.get("label"): w["workspace_id"] for w in herdr_workspaces() if "workspace_id" in w}
+    return by_label.get(herdr_task_label(task)) or by_label.get(task, "")
+
+
+def check_orchestrator(task: str) -> None:
+    """[herdr] orchestrator 가 있으면 새 작업은 그 워크스페이스에서만 만든다. 있는 작업에 레포를 더하는 건 된다."""
+    if not (CFG.herdr_orchestrator and in_herdr()):
+        return
+    here = os.environ.get("HERDR_WORKSPACE_ID", "")
+    label = next((w.get("label", "") for w in herdr_workspaces() if w.get("workspace_id") == here), "")
+    if label != CFG.herdr_orchestrator:
+        raise Fail(f"새 작업('{task}')은 오케스트레이터 워크스페이스('{CFG.herdr_orchestrator}')에서만 만듭니다"
+                   f"(지금: '{label or here or '?'}'). 사용자에게 오케스트레이터 탭에서 새 작업으로 요청해 달라고 하세요. "
+                   f"지금 작업에 레포를 더하려면 지금 작업 이름을 쓰세요")
 
 
 # ---------- new / list ----------
@@ -241,6 +267,8 @@ def issue_lines(meta: dict | None) -> list[str]:
 
 def cmd_new(a: argparse.Namespace) -> None:
     tdir = task_dir(a.task, must_exist=False)
+    if not tdir.is_dir():
+        check_orchestrator(a.task)
     repos = a.repos
     for r in repos:
         if "/" in r or not (CFG.root / r / ".git").exists():
@@ -268,11 +296,12 @@ def cmd_new(a: argparse.Namespace) -> None:
         info(f"· {r}: {branch} ← origin/{base} ({sha[:9]})")
 
     if in_herdr():
-        if herdr_ws_by_label(a.task):
-            info(f"· herdr: 워크스페이스 '{a.task}' 이미 있음")
+        label = herdr_task_label(a.task)
+        if herdr_task_ws(a.task):
+            info(f"· herdr: 워크스페이스 '{label}' 이미 있음")
         else:
-            run(["herdr", "workspace", "create", "--cwd", str(CFG.root), "--label", a.task, "--no-focus"])
-            info(f"· herdr: 워크스페이스 '{a.task}' 만듦 (cwd={CFG.root})")
+            run(["herdr", "workspace", "create", "--cwd", str(CFG.root), "--label", label, "--no-focus"])
+            info(f"· herdr: 워크스페이스 '{label}' 만듦 (cwd={CFG.root})")
     if CFG.run_hint:
         info()
         info("실행: " + CFG.run_hint.format(task=a.task))
@@ -599,19 +628,21 @@ def cmd_done(a: argparse.Namespace) -> None:
 
     for r, branch in plan:
         main = CFG.root / r.name
-        git(main, "worktree", "remove", str(r))
+        # 서브모듈이 있는 worktree 는 git 이 --force 없이 지우지 않는다. 미커밋 변경이 없는 건 위에서 확인했다.
+        force = ["--force"] if (r / ".gitmodules").exists() else []
+        git(main, "worktree", "remove", *force, str(r))
         git(main, "branch", "-D", branch)
         info(f"· {r.name}: worktree·로컬 브랜치 {branch} 지움")
     shutil.rmtree(tdir)
     info(f"· 폴더 {tdir} 지움")
 
-    ws = herdr_ws_by_label(a.task)
+    ws = herdr_task_ws(a.task)
     if ws:
         if ws == os.environ.get("HERDR_WORKSPACE_ID"):
             info(f"· herdr: 지금 이 워크스페이스({ws})라 닫지 않았습니다. 직접 닫으세요")
         else:
             run(["herdr", "workspace", "close", ws])
-            info(f"· herdr: 워크스페이스 '{a.task}'({ws}) 닫음")
+            info(f"· herdr: 작업 '{a.task}' 워크스페이스({ws}) 닫음")
 
 
 # ---------- main ----------

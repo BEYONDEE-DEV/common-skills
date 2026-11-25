@@ -41,6 +41,24 @@ FAKE_GH = textwrap.dedent('''\
     json.dump(data, open(db, "w"), ensure_ascii=False)
 ''')
 
+# 워크스페이스를 파일(JSON)에 기록하는 가짜 herdr. task.py 가 쓰는 workspace list / create / close 만 흉내 낸다.
+FAKE_HERDR = textwrap.dedent('''\
+    #!/usr/bin/env python3
+    import json, os, sys
+    db = os.environ["FAKE_HERDR_DB"]
+    data = json.load(open(db))
+    args = sys.argv[1:]
+    def opt(n): return args[args.index(n) + 1] if n in args else None
+    if args[:2] == ["workspace", "list"]:
+        print(json.dumps({"result": {"workspaces": data["workspaces"]}}))
+    elif args[:2] == ["workspace", "create"]:
+        wid = f"w{len(data['workspaces']) + 1}"
+        data["workspaces"].append({"workspace_id": wid, "label": opt("--label"), "cwd": opt("--cwd")})
+    elif args[:2] == ["workspace", "close"]:
+        data["workspaces"] = [w for w in data["workspaces"] if w["workspace_id"] != args[2]]
+    json.dump(data, open(db, "w"), ensure_ascii=False)
+''')
+
 CONFIG = textwrap.dedent('''\
     worktrees = "worktrees"
     branch_prefix = "dev-feature-"
@@ -221,6 +239,64 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertFalse((self.root / "worktrees/t1").exists())
         self.assertEqual(self.sh("git", "branch", "--list", "dev-feature-t1", cwd=self.root / "api"), "")
+
+
+    def use_herdr(self, here: str, workspaces: list[dict]) -> None:
+        herdr = self.tmp / "bin" / "herdr"
+        herdr.write_text(FAKE_HERDR)
+        herdr.chmod(0o755)
+        (self.tmp / "herdr.json").write_text(json.dumps({"workspaces": workspaces}))
+        self.env.update({"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": here, "FAKE_HERDR_DB": str(self.tmp / "herdr.json")})
+        with open(self.root / ".task.toml", "a") as f:
+            f.write('[herdr]\norchestrator = "proj"\nlabel = "└ {task}"\n')
+
+    def labels(self) -> list[str]:
+        return [w["label"] for w in json.loads((self.tmp / "herdr.json").read_text())["workspaces"]]
+
+    def test_herdr_only_orchestrator_creates_tasks(self) -> None:
+        self.use_herdr("w2", [{"workspace_id": "w1", "label": "proj"}, {"workspace_id": "w2", "label": "└ t1"}])
+        out = self.task("new", "t2", "api", "--no-issue")
+        self.assertIn("오케스트레이터", out.stderr, "작업 워크스페이스에서는 새 작업을 못 만든다")
+        self.assertFalse((self.root / "worktrees/t2").exists())
+
+        self.env["HERDR_WORKSPACE_ID"] = "w1"
+        out = self.task("new", "t1", "api", "--no-issue")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.labels(), ["proj", "└ t1"], "이미 있는 작업 워크스페이스는 다시 만들지 않는다")
+        out = self.task("new", "t3", "api", "--no-issue")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.labels(), ["proj", "└ t1", "└ t3"], "작업 워크스페이스 이름은 [herdr] label")
+
+        self.env["HERDR_WORKSPACE_ID"] = "w2"
+        out = self.task("new", "t1", "other")
+        self.assertEqual(out.returncode, 0, "있는 작업에 레포를 더하는 건 작업 워크스페이스에서도 된다: " + out.stderr)
+
+        self.env["HERDR_WORKSPACE_ID"] = "w1"
+        self.assertEqual(self.task("done", "t3").returncode, 0)
+        self.assertEqual(self.labels(), ["proj", "└ t1"])
+
+    def test_done_closes_workspace_named_before_label_setting(self) -> None:
+        self.use_herdr("w1", [{"workspace_id": "w1", "label": "proj"}, {"workspace_id": "w2", "label": "t1"}])
+        self.task("new", "t1", "api", "--no-issue")
+        self.assertEqual(self.labels(), ["proj", "t1"], "이름이 작업 이름인 옛 워크스페이스도 그 작업 것으로 본다")
+        self.assertEqual(self.task("done", "t1").returncode, 0)
+        self.assertEqual(self.labels(), ["proj"])
+
+    def test_done_removes_worktree_with_submodule(self) -> None:
+        api = self.root / "api"
+        self.sh("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-b", "dev",
+                str(self.tmp / "remotes" / "other.git"), "lib", cwd=api)
+        self.sh("git", "commit", "-qm", "add submodule", cwd=api)
+        self.sh("git", "push", "-q", "origin", "HEAD:dev", cwd=api)
+        self.task("new", "t1", "api", "--no-issue")
+        wt = self.root / "worktrees/t1/api"
+        self.sh("git", "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", cwd=wt)
+        (wt / "lib" / "x.txt").write_text("x")
+        self.assertIn("커밋 안 된 변경", self.task("done", "t1").stderr, "서브모듈 안 변경도 지우지 않는다")
+        (wt / "lib" / "x.txt").unlink()
+        out = self.task("done", "t1")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse((self.root / "worktrees/t1").exists())
 
 
 if __name__ == "__main__":
