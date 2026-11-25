@@ -20,7 +20,7 @@ python3 "<skill-dir>/../../scripts/task.py" <명령> ...
 
 | 명령 | 하는 일 |
 |---|---|
-| `new <작업> <레포...> [--issue <ID>...\|--no-issue] [--base <브랜치>] [--branch <브랜치>]` | 이슈를 작업에 저장하고, 레포마다 `<branch_prefix><작업>` 브랜치를 기준 브랜치에서 upstream 없이 만든다. 이미 있는 작업이면 빠진 레포만 더한다. herdr 안이면 작업 이름 워크스페이스(cwd=루트)를 만든다 |
+| `new <작업> <레포...> [--issue <ID>...\|--no-issue] [--base <브랜치>] [--branch <브랜치>]` | 이슈를 작업에 저장하고, 레포마다 `<branch_prefix><작업>` 브랜치를 기준 브랜치에서 upstream 없이 만든다. 이미 있는 작업이면 빠진 레포만 더한다. herdr 안이면 작업 워크스페이스(이름은 `[herdr] label`, cwd=루트)를 만든다 |
 | `list` | 작업 폴더와 레포별 브랜치·미커밋 수 |
 | `status <작업>` | 레포별 앞섬/뒤처짐, 미커밋, PR 상태·충돌 여부, PR 본문 준비 상태 |
 | `done <작업> [--force]` | worktree·로컬 브랜치·폴더를 지우고 herdr 워크스페이스를 닫는다 |
@@ -30,6 +30,7 @@ python3 "<skill-dir>/../../scripts/task.py" <명령> ...
 - 저장한 이슈는 pr 이 PR 본문 맨 위 링크, PR 제목, 커밋 첫 줄에 붙인다.
 - `new` 는 기준 브랜치를 받아 와 GitHub 와 같은지 확인한 뒤 만든다. 같은 이름의 브랜치가 로컬이나 원격에 있으면 멈춘다(지난 작업일 수 있음) — 다른 이름을 쓴다.
 - 작업 중 다른 레포가 필요해지면 같은 작업 이름으로 `new` 를 다시 부른다.
+- `[herdr] orchestrator` 가 있으면 herdr 안에서 **새 작업은 그 이름의 워크스페이스에서만** 만든다. 작업 워크스페이스에서 다른 작업 이름으로 `new` 를 부르면 멈춘다 — 그때는 직접 만들지 말고, 사용자에게 오케스트레이터 탭에서 새 작업으로 요청해 달라고 알린다. 있는 작업에 레포를 더하는 건 어디서나 된다.
 - `done` 은 이 폴더에서 도는 프로세스, 미커밋 변경, 원격에도 없고 머지된 PR 도 없는 커밋이 있으면 아무것도 지우지 않고 멈춘다. `--force` 는 마지막 경우만 넘기며, 사용자가 그 커밋을 버리라고 했을 때만 쓴다. 원격 브랜치는 지우지 않는다.
 
 ## .task.toml
@@ -49,6 +50,10 @@ legacy-api = "release"
 [issue]
 url = "https://example.youtrack.cloud/issue/{id}"
 pattern = "PROJ-[0-9]+"
+
+[herdr]
+orchestrator = "my-project"
+label = "└ {task}"
 ```
 
 | 키 | 기본값 | 뜻 |
@@ -61,5 +66,7 @@ pattern = "PROJ-[0-9]+"
 | `[bases]` | 비어 있음 | 레포 폴더 이름 = 그 레포만의 기준 브랜치 |
 | `[issue] url` | 없음 | 이슈 링크 주소. `{id}` 는 이슈 ID. 있으면 `new` 때 이슈를 묻는다 |
 | `[issue] pattern` | 없음 | 이슈 ID 형식(정규식). 맞지 않는 ID 는 거절 |
+| `[herdr] orchestrator` | 없음 | herdr 안에서 새 작업을 만들 수 있는 워크스페이스 이름. 없으면 어디서나 |
+| `[herdr] label` | `"{task}"` | 작업 워크스페이스 이름. `{task}` 는 작업 이름. `└ {task}` 처럼 쓰면 사이드바에서 오케스트레이터 아래처럼 보인다(herdr 는 git worktree 가 아닌 워크스페이스를 묶지 못함) |
 
 필요: Python 3.11+, `git`, 인증된 `gh`.
